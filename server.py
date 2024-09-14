@@ -129,29 +129,51 @@ def get_value_by_jsonpath(json_data, json_path):
     match = jsonpath_expr.find(json_data)
     return [m.value for m in match]
 
-def check_balance(address, api_endpoint, json_path, logger, proxy=None):
+def parse_and_sum_jsonpaths(expression, json_data, logger):
+    # Разбиваем строку по символу "+"
+    json_paths = expression.split('+')
+    total_sum = 0
+    missing_paths = []
+
+    # Проходим по каждому пути
+    for json_path in json_paths:
+        json_path = json_path.strip()  # Убираем возможные пробелы
+        result = get_value_by_jsonpath(json_data, json_path)
+
+        if result:
+            value = result[0]  # Берем первое значение
+            logger.info(f"Found value at {json_path}: {value}")
+            total_sum += float(value)  # Складываем найденное значение
+        else:
+            logger.error(f"No value found for path {json_path}")
+            missing_paths.append(json_path)
+    
+    if missing_paths:
+        return total_sum, f"Some paths were not found: {', '.join(missing_paths)}"
+    else:
+        return total_sum, ""
+
+def check_balance(address, api_endpoint, expression, logger, proxy=None):
     token_url = f"{api_endpoint}{address}"
     
     proxies = None
     if proxy: 
         proxies = {'http': proxy, 'https': proxy}
+    
     try:
         response = requests.get(token_url, proxies=proxies)
         data = response.json()
-        result = get_value_by_jsonpath(data, json_path)
-        if result:
-            logger.info(f"Found value at {json_path}: {result[0]}")
-            return result[0], ""
-        else:
-            logger.error(f"No value found for path {json_path} at address {address}")
-            return None, "Value not found"
-    
+
+        # Парсим и суммируем значения по переданной строке expression
+        total_sum, message = parse_and_sum_jsonpaths(expression, data, logger)
+        return total_sum, message
+
     except Exception as e:
         logger.error(f"Error while checking token transactions for address {address}: {e}")
         raise Exception(f"Error while checking token transactions for address {address}: {e}")
-
+        
 def find_none_value(grist, table=None):
-    wallets = grist.fetch_table(table)
+    wallets = grist.fetch_table()
     for wallet in wallets:
         if (wallet.Value is None or wallet.Value == "" ):
             if (wallet.Address is not None and wallet.Address != ""):
