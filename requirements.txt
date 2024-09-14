@@ -1,0 +1,10 @@
+certifi==2024.8.30
+charset-normalizer==3.3.2
+future==1.0.0
+grist-api==0.1.0
+idna==3.9
+jsonpath-ng==1.6.1
+ply==3.11
+PySocks==1.7.1
+requests==2.32.3
+urllib3==2.2.3
