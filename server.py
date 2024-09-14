@@ -171,7 +171,7 @@ def check_balance(address, api_endpoint, expression, logger, proxy=None):
     except Exception as e:
         logger.error(f"Error while checking token transactions for address {address}: {e}")
         raise Exception(f"Error while checking token transactions for address {address}: {e}")
-        
+
 def find_none_value(grist, table=None):
     wallets = grist.fetch_table()
     for wallet in wallets:
@@ -213,6 +213,9 @@ def main():
                     logger.info(f"Check wallet {none_value_wallet.Address}/{path} with proxy {none_value_wallet.Proxy}...")                
                     value, msg = check_balance(none_value_wallet.Address, url, path, logger, none_value_wallet.Proxy) 
                     grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
+                else:
+                    if none_value_wallet.Comment != "No proxy":
+                        grist.update(none_value_wallet.id, {"Comment": "No proxy"})
             except Exception as e:
                 #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
                 grist.update(none_value_wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
