@@ -1,5 +1,4 @@
 # pylint: disable=broad-exception-raised,too-many-arguments
-import subprocess
 import time
 import json
 import logging
@@ -25,7 +24,6 @@ class GRIST:
         self.settings_table = settings_table.replace(" ", "_")
         self.logger = logger
         self.grist = GristDocAPI(doc_id, server=server, api_key=api_key)
-
 
     def to_timestamp(self, dtime: datetime) -> int:
         if dtime.tzinfo is None:
@@ -130,20 +128,17 @@ def get_value_by_jsonpath(json_data, json_path):
     return [m.value for m in match]
 
 def parse_and_sum_jsonpaths(expression, json_data, logger):
-    # Разбиваем строку по символу "+"
     json_paths = expression.split('+')
     total_sum = 0
     missing_paths = []
 
-    # Проходим по каждому пути
     for json_path in json_paths:
-        json_path = json_path.strip()  # Убираем возможные пробелы
+        json_path = json_path.strip()
         result = get_value_by_jsonpath(json_data, json_path)
 
         if result:
-            value = result[0]  # Берем первое значение
-            logger.info(f"Found value at {json_path}: {value}")
-            total_sum += float(value)  # Складываем найденное значение
+            logger.info(f"Found value at {json_path}: {result[0]}")
+            total_sum += float(result[0])
         else:
             logger.error(f"No value found for path {json_path}")
             missing_paths.append(json_path)
@@ -159,21 +154,18 @@ def check_balance(address, api_endpoint, expression, logger, proxy=None):
     proxies = None
     if proxy: 
         proxies = {'http': proxy, 'https': proxy}
-    
+
     try:
         response = requests.get(token_url, proxies=proxies)
-        data = response.json()
-
-        # Парсим и суммируем значения по переданной строке expression
-        total_sum, message = parse_and_sum_jsonpaths(expression, data, logger)
+        total_sum, message = parse_and_sum_jsonpaths(expression, response.json(), logger)
         return total_sum, message
 
     except Exception as e:
         logger.error(f"Error while checking token transactions for address {address}: {e}")
-        raise Exception(f"Error while checking token transactions for address {address}: {e}")
+        raise Exception(f"Error while checking token transactions for address {address}: {e}") from e
 
 def find_none_value(grist, table=None):
-    wallets = grist.fetch_table()
+    wallets = grist.fetch_table(table)
     for wallet in wallets:
         if (wallet.Value is None or wallet.Value == "" ):
             if (wallet.Address is not None and wallet.Address != ""):
@@ -195,7 +187,6 @@ def main():
     api_key = os.getenv("GRIST_API_KEY")
     nodes_table = "Wallets"
     settings_table = "Settings"
-    chains_table = "Chains" 
     grist = GRIST(server, doc_id, api_key, nodes_table, settings_table, logger)
     while True:
         try:
@@ -220,6 +211,8 @@ def main():
                 #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
                 grist.update(none_value_wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
                 logger.error(f"Error occurred: {e}")
+
+            time.sleep(random.uniform(0, 1))
         except Exception as e:
             logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
