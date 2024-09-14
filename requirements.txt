@@ -1,5 +1,6 @@
 certifi==2024.8.30
 charset-normalizer==3.3.2
+colorama==0.4.6
 future==1.0.0
 grist-api==0.1.0
 idna==3.9
