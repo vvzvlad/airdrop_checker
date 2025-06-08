@@ -1,4 +1,13 @@
-# pylint: disable=broad-exception-raised,too-many-arguments
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# flake8: noqa
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=multiple-statements, logging-fstring-interpolation, trailing-whitespace, line-too-long
+# pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
+# pylint: disable=f-string-without-interpolation, wrong-import-position
+# pylance: disable=reportMissingImports, reportMissingModuleSource
+
 import time
 import json
 import logging
@@ -147,31 +156,58 @@ def parse_and_sum_jsonpaths(expression, json_data, logger):
         return total_sum, f"Some paths were not found: {', '.join(missing_paths)}"
     else:
         return total_sum, ""
-
-def check_balance(address, api_endpoint, expression, logger, proxy=None):
-    token_url = f"{api_endpoint}{address}"
     
+def generate_proxy():
+    random_token = str(uuid.uuid4())[:10]
+    proxy = f"socks5://IDrqLdjR7F3Mlaws0Y2C_s_{random_token}:RNW78Fm5@185.162.130.86:10718"
+    return proxy
+
+def check_balance(address, logger, proxy=None):
+    hype_price_url = "https://purrfolio.com/api/hype-price"
+    debank_url = "https://purrfolio.com/api/debank-data?address="
+    hypercore_url = "https://purrfolio.com/api/hypercore-holdings?address="
+
     proxies = None
     if proxy: 
         proxies = {'http': proxy, 'https': proxy}
 
     try:
-        response = requests.get(token_url, proxies=proxies)
-        total_sum, message = parse_and_sum_jsonpaths(expression, response.json(), logger)
-        return total_sum, message
+        hype_price_response = requests.get(hype_price_url, proxies=proxies)
+        hype_price = hype_price_response.json()["price"]
+
+        debank_response = requests.get(debank_url + address, proxies=proxies)
+        debank_usd_value = debank_response.json()["usd_value"]
+
+        hypercore_response = requests.get(hypercore_url + address, proxies=proxies)
+        hypercore_usd_value = hypercore_response.json()["grandTotal"]
+
+        hypercore_hype_value = hypercore_usd_value / hype_price
+        hyperevm_hype_value = debank_usd_value / hype_price
+
+        return hypercore_hype_value, hyperevm_hype_value
 
     except Exception as e:
         logger.error(f"Error while checking token transactions for address {address}: {e}")
         raise Exception(f"Error while checking token transactions for address {address}: {e}") from e
 
-def find_none_value(grist, table=None):
+def find_none_value(grist, table=None, random=False):
     wallets = grist.fetch_table(table)
+    if random:
+        random.shuffle(wallets)
     for wallet in wallets:
         if (wallet.Value is None or wallet.Value == "" ):
             if (wallet.Address is not None and wallet.Address != ""):
                 return wallet
     return None
     
+def find_none_values(grist, table=None, random=False, count=1):
+    wallets = grist.fetch_table(table)
+    if random:
+        random.shuffle(wallets)
+    wallets = [wallet for wallet in wallets if wallet.Value is None or wallet.Value == ""]
+    if random:
+        random.shuffle(wallets)
+    return wallets[:count]
 
 def main():
     colorama.init(autoreset=True)
@@ -190,29 +226,33 @@ def main():
     grist = GRIST(server, doc_id, api_key, nodes_table, settings_table, logger)
     while True:
         try:
-            url = grist.find_settings("URL")
-            path = grist.find_settings("Path")
-            logger.info(f"Chain: {url} / {path}")
-            none_value_wallet = find_none_value(grist)
+            #url = grist.find_settings("URL")
+            #path = grist.find_settings("Path")
+            #logger.info(f"Chain: {url} / {path}")
+            #none_value_wallet = find_none_value(grist, random=True)
+            random.seed(datetime.now().timestamp())
+            wallets_count = random.randint(2, 5)
+            wallets = find_none_values(grist, random=True, count=wallets_count)
             try:
-                
-                if none_value_wallet is None:
-                    logger.info("All wallets have values, sleep 10s")
+                proxy = generate_proxy()
+                if wallets is None or len(wallets) == 0:
+                    logger.info("No wallets to check, sleep 10s")
                     time.sleep(10)
                     continue
-                if none_value_wallet.Proxy is not None and none_value_wallet.Proxy != "":
-                    logger.info(f"Check wallet {none_value_wallet.Address}/{path} with proxy {none_value_wallet.Proxy}...")                
-                    value, msg = check_balance(none_value_wallet.Address, url, path, logger, none_value_wallet.Proxy) 
-                    grist.update(none_value_wallet.id, {"Value": value, "Comment": msg})  
-                else:
-                    if none_value_wallet.Comment != "No proxy":
-                        grist.update(none_value_wallet.id, {"Comment": "No proxy"})
+                for wallet in wallets:
+                    try:
+                        logger.info(f"Check wallet {wallet.Address} with proxy {proxy}...")
+                        hypercore_hype_value, hyperevm_hype_value = check_balance(wallet.Address, logger, proxy)
+                        grist.update(wallet.id, {"hypercore_hype_value": hypercore_hype_value, "hyperevm_hype_value": hyperevm_hype_value})  
+                    except Exception as e:
+                        logger.error(f"Error occurred: {e}")
+                        grist.update(wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
             except Exception as e:
-                #logger.error(f"Fail: {e}\n{traceback.format_exc()}")
-                grist.update(none_value_wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
                 logger.error(f"Error occurred: {e}")
+                time.sleep(10)
+                continue
 
-            time.sleep(random.uniform(0, 1))
+            time.sleep(random.uniform(5*60, 10*60))
         except Exception as e:
             logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
