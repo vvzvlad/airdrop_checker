@@ -16,6 +16,7 @@ import random
 import os
 import re
 import traceback
+import uuid
 from datetime import datetime, timedelta, timezone
 from jsonpath_ng import jsonpath, parse
 
@@ -190,9 +191,9 @@ def check_balance(address, logger, proxy=None):
         logger.error(f"Error while checking token transactions for address {address}: {e}")
         raise Exception(f"Error while checking token transactions for address {address}: {e}") from e
 
-def find_none_value(grist, table=None, random=False):
+def find_none_value(grist, table=None, do_random=False):
     wallets = grist.fetch_table(table)
-    if random:
+    if do_random:
         random.shuffle(wallets)
     for wallet in wallets:
         if (wallet.Value is None or wallet.Value == "" ):
@@ -200,12 +201,12 @@ def find_none_value(grist, table=None, random=False):
                 return wallet
     return None
     
-def find_none_values(grist, table=None, random=False, count=1):
+def find_none_values(grist, table=None, do_random=False, count=1):
     wallets = grist.fetch_table(table)
-    if random:
+    if do_random:
         random.shuffle(wallets)
     wallets = [wallet for wallet in wallets if wallet.Value is None or wallet.Value == ""]
-    if random:
+    if do_random:
         random.shuffle(wallets)
     return wallets[:count]
 
@@ -229,10 +230,10 @@ def main():
             #url = grist.find_settings("URL")
             #path = grist.find_settings("Path")
             #logger.info(f"Chain: {url} / {path}")
-            #none_value_wallet = find_none_value(grist, random=True)
+            #none_value_wallet = find_none_value(grist, do_random=True)
             random.seed(datetime.now().timestamp())
             wallets_count = random.randint(2, 5)
-            wallets = find_none_values(grist, random=True, count=wallets_count)
+            wallets = find_none_values(grist, do_random=True, count=wallets_count)
             try:
                 proxy = generate_proxy()
                 if wallets is None or len(wallets) == 0:
