@@ -174,13 +174,13 @@ def check_balance(address, logger, proxy=None):
 
     try:
         hype_price_response = requests.get(hype_price_url, proxies=proxies)
-        hype_price = float(hype_price_response.json()["price"])
+        hype_price = float(re.sub(r'[^\d.]', '', str(hype_price_response.json()["price"])))
 
         debank_response = requests.get(debank_url + address, proxies=proxies)
-        debank_usd_value = float(debank_response.json()["usd_value"])
+        debank_usd_value = float(re.sub(r'[^\d.]', '', str(debank_response.json()["usd_value"])))
 
         hypercore_response = requests.get(hypercore_url + address, proxies=proxies)
-        hypercore_usd_value = float(hypercore_response.json()["grandTotal"])
+        hypercore_usd_value = float(re.sub(r'[^\d.]', '', str(hypercore_response.json()["grandTotal"])))
 
         hypercore_hype_value = hypercore_usd_value / hype_price
         hyperevm_hype_value = debank_usd_value / hype_price
