@@ -250,6 +250,7 @@ def main():
                         grist.update(wallet.id, {"Value": "--", "Comment": f"Error: {e}"})  
             except Exception as e:
                 logger.error(f"Error occurred: {e}")
+                logger.error(f"Fail: {e}\n{traceback.format_exc()}")
                 time.sleep(10)
                 continue
 
