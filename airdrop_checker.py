@@ -203,12 +203,11 @@ def find_none_value(grist, table=None, do_random=False):
     
 def find_none_values(grist, table=None, do_random=False, count=1):
     wallets = grist.fetch_table(table)
-    if do_random:
-        random.shuffle(wallets)
-    wallets = [wallet for wallet in wallets if wallet.Value is None or wallet.Value == ""]
-    if do_random:
-        random.shuffle(wallets)
-    return wallets[:count]
+    if do_random: random.shuffle(wallets)
+    wallets_non_empty_address = [wallet for wallet in wallets if (wallet.Address is not None and wallet.Address != "")]
+    wallets_none_value = [wallet for wallet in wallets_non_empty_address if (wallet.Value is None or wallet.Value == "")]
+    if do_random: random.shuffle(wallets_none_value)
+    return wallets_none_value[:count]
 
 def main():
     colorama.init(autoreset=True)
