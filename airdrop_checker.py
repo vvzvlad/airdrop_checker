@@ -196,8 +196,9 @@ def find_none_value(grist, table=None, do_random=False):
     if do_random:
         random.shuffle(wallets)
     for wallet in wallets:
-        if (wallet.Value is None or wallet.Value == "" ):
-            if (wallet.Address is not None and wallet.Address != ""):
+        if (wallet.Address is not None and wallet.Address != ""):
+            if (wallet.hypercore_hype_value is None or wallet.hypercore_hype_value == "") or \
+               (wallet.hyperevm_hype_value is None or wallet.hyperevm_hype_value == ""):
                 return wallet
     return None
     
@@ -205,9 +206,9 @@ def find_none_values(grist, table=None, do_random=False, count=1):
     wallets = grist.fetch_table(table)
     if do_random: random.shuffle(wallets)
     wallets_non_empty_address = [wallet for wallet in wallets if (wallet.Address is not None and wallet.Address != "")]
-    wallets_none_value = [wallet for wallet in wallets_non_empty_address if (wallet.Value is None or wallet.Value == "")]
-    if do_random: random.shuffle(wallets_none_value)
-    return wallets_none_value[:count]
+    wallets_to_check = [wallet for wallet in wallets_non_empty_address if (wallet.hypercore_hype_value is None or wallet.hypercore_hype_value == "") or (wallet.hyperevm_hype_value is None or wallet.hyperevm_hype_value == "")]
+    if do_random: random.shuffle(wallets_to_check)
+    return wallets_to_check[:count]
 
 def main():
     colorama.init(autoreset=True)
