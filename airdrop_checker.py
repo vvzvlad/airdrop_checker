@@ -253,7 +253,9 @@ def main():
                 time.sleep(10)
                 continue
 
-            time.sleep(random.uniform(5*60, 10*60))
+            time_to_sleep = random.uniform(5*60, 10*60) 
+            logger.info(f"Sleep {time_to_sleep/60} minutes")
+            time.sleep(time_to_sleep)
         except Exception as e:
             logger.error(f"Error occurred, sleep 10s: {e}")
             time.sleep(10)
