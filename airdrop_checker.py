@@ -236,6 +236,7 @@ def main():
             wallet_count_min = int(grist.find_settings("Walled count min"))
             wait_time_max = int(grist.find_settings("Wait time max"))
             wait_time_min = int(grist.find_settings("Wait time min"))
+            logger.info(f"wallet_count_max: {wallet_count_max}, wallet_count_min: {wallet_count_min}, wait_time_max: {wait_time_max}, wait_time_min: {wait_time_min}")
             wallets_count = random.randint(wallet_count_min, wallet_count_max)
             wallets = find_none_values(grist, do_random=True, count=wallets_count)
             try:
