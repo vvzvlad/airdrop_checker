@@ -232,7 +232,11 @@ def main():
             #logger.info(f"Chain: {url} / {path}")
             #none_value_wallet = find_none_value(grist, do_random=True)
             random.seed(datetime.now().timestamp())
-            wallets_count = random.randint(2, 5)
+            wallet_count_max = int(grist.find_settings("Walled count max"))
+            wallet_count_min = int(grist.find_settings("Walled count min"))
+            wait_time_max = int(grist.find_settings("Wait time max"))
+            wait_time_min = int(grist.find_settings("Wait time min"))
+            wallets_count = random.randint(wallet_count_min, wallet_count_max)
             wallets = find_none_values(grist, do_random=True, count=wallets_count)
             try:
                 proxy = generate_proxy()
@@ -254,7 +258,7 @@ def main():
                 time.sleep(10)
                 continue
 
-            time_to_sleep = random.uniform(5*60, 10*60) 
+            time_to_sleep = random.uniform(wait_time_min*60, wait_time_max*60) 
             logger.info(f"Sleep {time_to_sleep/60} minutes")
             time.sleep(time_to_sleep)
         except Exception as e:
