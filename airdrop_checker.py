@@ -173,13 +173,13 @@ def check_balance(address, logger, proxy=None):
         proxies = {'http': proxy, 'https': proxy}
 
     try:
-        hype_price_response = requests.get(hype_price_url, proxies=proxies)
+        hype_price_response = requests.get(hype_price_url, proxies=proxies, timeout=10)
         hype_price = float(re.sub(r'[^\d.]', '', str(hype_price_response.json()["price"])))
 
-        debank_response = requests.get(debank_url + address, proxies=proxies)
+        debank_response = requests.get(debank_url + address, proxies=proxies, timeout=10)
         debank_usd_value = float(re.sub(r'[^\d.]', '', str(debank_response.json()["usd_value"])))
 
-        hypercore_response = requests.get(hypercore_url + address, proxies=proxies)
+        hypercore_response = requests.get(hypercore_url + address, proxies=proxies, timeout=10)
         hypercore_usd_value = float(re.sub(r'[^\d.]', '', str(hypercore_response.json()["grandTotal"])))
 
         hypercore_hype_value = hypercore_usd_value / hype_price
@@ -198,7 +198,7 @@ def find_none_value(grist, table=None, do_random=False):
     for wallet in wallets:
         if (wallet.Address is not None and wallet.Address != ""):
             if (wallet.hypercore_hype_value is None or wallet.hypercore_hype_value == "") or \
-               (wallet.hyperevm_hype_value is None or wallet.hyperevm_hype_value == ""):
+                (wallet.hyperevm_hype_value is None or wallet.hyperevm_hype_value == ""):
                 return wallet
     return None
     
