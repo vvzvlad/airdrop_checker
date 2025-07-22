@@ -160,7 +160,8 @@ def parse_and_sum_jsonpaths(expression, json_data, logger):
     
 def generate_proxy():
     random_token = str(uuid.uuid4())[:10]
-    proxy = f"socks5://mqVOWDGRAnxga9FwPXky_s_{random_token}:RNW78Fm5@185.162.130.86:10221"
+    #proxy = f"socks5://mqVOWDGRAnxga9FwPXky_s_{random_token}:RNW78Fm5@185.162.130.86:10221"
+    proxy = f"socks5://KpplNvLQg1kWpV4oMEOi:RNW78Fm5@185.162.130.86:10000"
     return proxy
 
 def check_balance(address, logger, proxy=None):
