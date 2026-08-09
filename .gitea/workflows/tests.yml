@@ -1,0 +1,167 @@
+name: Tests
+
+# PR gate. This workflow deliberately never logs in to the registry and never pushes, and
+# not one `secrets` expression appears anywhere in this file — the word shows up only in
+# prose like this line, never as a value, so there is nothing here for a leak to leak. It
+# proves that the image still builds and that the image's command still runs a script that
+# compiles and can import everything it needs, while :latest — the tag the
+# `airdropchecker` container in the `crypt-common` stack on nebula follows — stays
+# untouched by PR branches.
+on:
+  # Manual re-run: without it a run that flaked on runner networking could only be retried
+  # by pushing an empty commit to the PR branch. Safe to expose here — this workflow
+  # touches no registry and no secrets, it only builds and smoke-tests.
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read   # checkout
+
+# Nothing here is published, so a superseded run has no value: when a PR gets a new push,
+# kill the in-flight check and run the fresh head instead. This is the opposite of
+# image-check-publish.yml, where cancelling would leave holes in the :<sha> tag history.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    # cirunner-hatbox is shared by every repository in the fleet, so a hung step does not
+    # just stall this run — it holds a runner slot that everyone else is queueing for.
+    # Gitea's own default is far too generous for that.
+    # Deliberately the same outer bound as image-check-publish.yml, so the two gates cannot
+    # drift apart on a number that is easy to change in one file and forget in the other.
+    # It is only ever an outer bound: this job has no push step, so its step-level timeouts
+    # (20 build + 5 smoke = 25 minutes) are the ones act_runner actually enforces, and 45
+    # leaves the rest for checkout and the two cleanup steps. It must stay above their sum:
+    # a job killed by this timeout may never run its `if: always()` cleanup, leaving a
+    # container and a ~400 MB image on the docker daemon shared by the whole fleet.
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Compute the local image tag
+      id: tags
+      # A purely local tag: no registry host in front of it, so there is nothing here that
+      # `docker push` could even target. The run id keeps concurrent PR checks on the
+      # shared runner daemon from clobbering each other's tag.
+      env:
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        echo "local=airdrop-checker-pr-check:$RUN_ID" >> "$GITHUB_OUTPUT"
+
+    - name: Build the Docker image
+      # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
+      # the job-level one above is only the outer bound. 20 minutes is far above a
+      # realistic cold build: this is `python:3.9` plus a `pip install` of eleven pinned
+      # pure-python wheels, roughly 400 MB and a couple of minutes, with nothing compiled.
+      # Same number as in image-check-publish.yml: the two gates build the identical
+      # Dockerfile and must not disagree about how long that is allowed to take.
+      timeout-minutes: 20
+      env:
+        # Through the environment rather than interpolated into the script text, same rule
+        # as everywhere else in this repo's workflows.
+        LOCAL_TAG: ${{ steps.tags.outputs.local }}
+      run: |
+        # --pull for the same reason as in image-check-publish.yml: cirunner-hatbox is
+        # self-hosted with a persistent docker daemon, so without the flag a stale
+        # python:3.9 could sit in the cache for months — and that base is already
+        # end-of-life, so its fixes only ever arrive as new digests behind the same tag.
+        # And as there, this is a BuildKit build despite the absence of `docker buildx` —
+        # that has been `docker build`'s default since Engine 23.0.
+        docker build --pull . --file Dockerfile --tag "$LOCAL_TAG"
+
+    - name: Smoke-test the built image
+      # There are no tests in this repo, so this is the whole PR gate. It runs the exact
+      # same ci/smoke.py against the exact same kind of container as
+      # image-check-publish.yml — only on a local tag, with no login and no push. Keeping
+      # the script in one file is the point: two copies of it would drift, and the PR gate
+      # would stop matching the gate that guards production.
+      #
+      # The container starts with the image's OWN command — no `--entrypoint`, which would
+      # also drop the image's CMD and make "does the image's command actually run the
+      # script" unanswerable (this image has no ENTRYPOINT, only
+      # `CMD while true; do python airdrop_checker.py; sleep 10; done`).
+      #
+      # There is deliberately NO readiness loop here: airdrop_checker serves no HTTP, so
+      # there is no port to poll, and "the container is up" would prove nothing anyway —
+      # the shell loop keeps it running for ten seconds after every crash. ci/smoke.py
+      # polls the container's own process table instead, with its own bounded loop.
+      #
+      # No environment is passed, and none is needed: none of the checks depends on the
+      # script getting anywhere, and this way the gate holds no credential and reaches no
+      # external API.
+      #
+      # Nothing is published to the host: the checks run from inside via `docker exec`, so
+      # parallel runs on this shared daemon cannot collide on a host port. The container
+      # name carries the run id for the same reason.
+      #
+      # Step-level `timeout-minutes`, the one act_runner is known to enforce (the job-level
+      # one is only the outer bound). Same 5 minutes as in image-check-publish.yml, for the
+      # same worst case: ci/smoke.py's ~20-30 s process-table poll plus a byte-compile and
+      # four imports.
+      timeout-minutes: 5
+      env:
+        SMOKE_TAG: ${{ steps.tags.outputs.local }}
+        NAME: airdrop-checker-pr-check-${{ github.run_id }}
+      # The body of this step is byte-identical to the one in image-check-publish.yml,
+      # comments and all. Only the `env:` values above differ. The PR gate and the
+      # publishing gate must run the same checks against the same kind of container, and
+      # the cheapest way to guarantee that is for the two scripts to be literally the same
+      # text — anything else drifts, and it drifts silently, in the direction of the PR
+      # gate testing less.
+      run: |
+        # Self-healing retry: re-running a run from the UI keeps the same run_id, so $NAME
+        # is exactly the name the previous attempt used — and an attempt killed by its
+        # timeout never reaches the `if: always()` cleanup that would have removed the
+        # container. Without this line the retry dies immediately on `docker run` with
+        # "name already in use", and CI stays broken until somebody clears it by hand on
+        # the shared runner host. A no-op on every run that has nothing left behind.
+        docker rm -f "$NAME" || true
+
+        docker run -d --name "$NAME" "$SMOKE_TAG"
+
+        # Fed over stdin, so the image does not have to carry the test file and the very
+        # same script can be run by hand against a local container.
+        #
+        # `-u` is not decoration: this stdout is a pipe, and CPython block-buffers those.
+        # A normal exit flushes (SystemExit(1) included, so a self-reported failure is
+        # never lost), but a step killed by the timeout above would take the whole buffer
+        # with it — losing every `ok` line already printed, in exactly the run whose log is
+        # the only thing left to diagnose from.
+        if ! docker exec -i "$NAME" python -u - < ci/smoke.py; then
+          echo "smoke failed; container logs:"
+          docker logs "$NAME"
+          exit 1
+        fi
+
+    - name: Remove the smoke container from the runner
+      # `always()`, and before the image cleanup below: cirunner-hatbox has one persistent
+      # docker daemon shared by every repository, so a container left behind by a failed
+      # run would sit there forever — and would also pin the image, making the `docker rmi`
+      # in the next step fail.
+      if: always()
+      env:
+        NAME: airdrop-checker-pr-check-${{ github.run_id }}
+      run: |
+        docker rm -f "$NAME" || true
+
+    - name: Remove the built image from the runner
+      # The runner's docker daemon is persistent and shared with other repos, so every PR
+      # check would otherwise leave an image behind forever. Removes ONLY the tag this run
+      # created — no `docker system prune`, which would also wipe the images of every other
+      # repo sharing the same daemon.
+      # This gate runs on every push to a PR, so it produces MORE of that garbage than the
+      # publishing workflow does — see the full note in image-check-publish.yml.
+      # It does NOT reclaim everything: `docker rmi <tag>` never frees the BuildKit cache
+      # (a separate builder store, reclaimed only by `docker builder prune`), and `--pull`
+      # leaves the previous base image dangling whenever upstream publishes a new
+      # python:3.9 digest. Both need a separate periodic cleanup on the runner host.
+      # `always()` so a failed smoke still cleans up after itself.
+      if: always()
+      env:
+        LOCAL_TAG: ${{ steps.tags.outputs.local }}
+      run: |
+        docker rmi "$LOCAL_TAG" || true
