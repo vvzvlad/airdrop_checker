@@ -1,0 +1,18 @@
+.git
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+data/
+tests/
+ci/
+# The dev/test dependency list. Excluded so the Dockerfile's claim that "tests, CI
+# and the dev requirements stay out of the image" is true of all three: the image
+# installs requirements.txt only, and a file that ships without being installed is
+# a misleading artefact inside the image.
+requirements-dev.txt
+.gitea/
+*.md
+*.code-workspace
+.DS_Store
