@@ -1,0 +1,13 @@
+# Dev/test dependencies — not needed at runtime, kept out of the image by
+# .dockerignore. Install everything with:  pip install -r requirements-dev.txt
+# (or just `make install`, which does it inside .venv).
+-r requirements.txt
+
+# pytest 8.4.x, not the 9.x used elsewhere in the fleet, and the reason is a hard
+# constraint rather than a preference: pytest 9 requires python >= 3.10, while CI
+# runs this suite inside `python:3.9-slim` on purpose — the same interpreter the
+# image ships. A suite that cannot run on 3.9 would have to be tested on 3.11 and
+# would then stop being evidence about the artefact. 8.4.2 supports 3.9 through
+# 3.14, so the same pin also works in a developer's local .venv.
+pytest==8.4.2
+pytest-cov==7.1.0

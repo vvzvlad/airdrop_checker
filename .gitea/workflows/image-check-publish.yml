@@ -5,8 +5,8 @@ name: Docker Image CI
 # the `crypt-common` stack on nebula carries watchtower labels, so whatever lands on
 # :latest is what gets rolled out once that stack is pointed at this registry (a separate,
 # manual step that is not this workflow's business). A build off a PR branch must never be
-# able to move that tag. PRs are covered by tests.yml, which builds and smoke-tests but
-# never logs in and never pushes.
+# able to move that tag. PRs are covered by tests.yml, which runs the same test suite and
+# the same smoke but never logs in and never pushes.
 #
 # The workflow this replaces — .github/workflows/docker-image.yml, pushing
 # `vvzvlad/airdrop_checker:latest` to Docker Hub — did at least get the trigger right: it
@@ -43,18 +43,145 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The gate the convention asks for: `build` needs this job, so red tests cannot produce
+    # an image at all. Before the layout refactor this repository had no tests and the smoke
+    # was the only thing standing between a commit and :latest.
+    # 25 is the outer bound over the single 20-minute step, leaving room for checkout and
+    # the cleanup that follows it — it must EXCEED the sum, because act_runner kills the
+    # whole job when this fires and a cleanup step that never runs is how a container ends
+    # up left behind on the shared daemon.
+    timeout-minutes: 25
+    # Job-level, so the step that CREATES the test container and the step that REMOVES it
+    # cannot disagree about its name. Written as two literals in two steps they would go on
+    # looking correct while one of them was edited, turning the cleanup into a step that
+    # removes nothing and reports success. The run id keeps concurrent runs on this shared
+    # daemon from colliding on the name.
+    env:
+      TEST_NAME: airdrop-checker-tests-${{ github.run_id }}
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Run the test suite in a container
+      # No `actions/setup-python` here, and that is deliberate rather than stylistic. Setup
+      # actions are not verified on this self-hosted runner, and the failure mode of a setup
+      # action that does not work is not a red job — it is a job that runs to the end having
+      # silently checked nothing, which on a push to main means an image published on the
+      # strength of a suite that never ran. Running it inside a container started by the
+      # same docker the build uses makes "the tests ran" and "docker works on this runner"
+      # the same statement.
+      timeout-minutes: 20
+      env:
+        # The SAME interpreter the Dockerfile ships. Testing under a different python than
+        # the one that runs in production is exactly the gap this arrangement exists to
+        # close — and it is why requirements-dev.txt pins pytest 8.4.x rather than the 9.x
+        # used elsewhere in the fleet: pytest 9 requires python >= 3.10 and simply cannot
+        # run here.
+        RUNTIME_IMAGE: python:3.9-slim
+      # The `run:` body of this step is byte-identical to the one in tests.yml. The PR job
+      # and the publishing job must run the same suite the same way, and the cheapest way to
+      # guarantee that is for the executed text to be literally the same text.
+      run: |
+        set -e
+        set -o pipefail
+        # Clear the name before claiming it. A re-run from the Gitea UI reuses the same
+        # github.run_id, so $TEST_NAME can already be taken by the container a previously
+        # killed attempt left behind — and `docker run --name` fails outright on a name
+        # conflict, so the re-run would die before the suite ever started, with an error
+        # about a container instead of about the code. `|| true` because on every normal run
+        # there is nothing there and this is a no-op. `-v` takes that leftover's anonymous
+        # volumes with it: nothing declares one today, but whoever adds a VOLUME to the
+        # Dockerfile will not think to come back here, and `docker rm -v` can never reach a
+        # named volume.
+        docker rm -f -v "$TEST_NAME" || true
+        # The workspace is streamed into the container as a tar over stdin rather than
+        # bind-mounted, and that is not a stylistic choice either. This job runs INSIDE
+        # act_runner's own job container while `docker` talks to the HOST's daemon through
+        # the mounted socket — so a `-v "$PWD:/src"` would ask the host to mount a path that
+        # means something entirely different there, or nothing at all, depending on how the
+        # runner was configured to hold the workspace. A tar over stdin is correct in every
+        # one of those configurations, and it also keeps the container from writing
+        # __pycache__ and .pytest_cache back into the checkout as root.
+        # Note that .dockerignore does NOT apply here — this is a tar, not a build context —
+        # which is what makes tests/ and requirements-dev.txt available, both of which the
+        # image itself deliberately excludes. That same fact is why every exclusion has to be
+        # spelled out here by hand, one flag each:
+        # `.git` is the largest thing in the tree and nothing in the suite reads it.
+        # `.venv` is a virtualenv built on the HOST — wheels for another platform and another
+        # interpreter than the python:3.9-slim about to run them. It is dead weight on stdin
+        # and nothing more: the container runs its own /usr/local/bin/python with VIRTUAL_ENV
+        # unset, so .venv/lib/*/site-packages never enters sys.path and cannot shadow what
+        # pip installs inside.
+        # `data/` is runtime state. On the runner it is empty and excluding it changes
+        # nothing — but this exact command is also what a developer runs BY HAND to reproduce
+        # a CI failure, and on a workstation that directory holds whatever the service left
+        # there.
+        # `.env` is the sharpest case of the same story. src/settings.py declares
+        # `SettingsConfigDict(env_file=".env")`, so pydantic-settings READS whichever one it
+        # finds beside the code. The runner's checkout has none; a workstation's holds real
+        # Grist credentials, and without this flag the by-hand reproduction would silently run
+        # against them — and would have shipped them into a container for nothing.
+        # `__pycache__` and `.pytest_cache` are bytecode and run caches written by a DIFFERENT
+        # interpreter than the one about to run the suite, so nothing in them is valid inside
+        # it: weight on stdin at best, stale state that muddies a failure at worst.
+        # `--pull always`: unlike GitHub's ephemeral runners this daemon is persistent, so
+        # without it a once-pulled python:3.9-slim would sit in its cache for months and the
+        # tests would run against an unpatched base — the same reason `docker build --pull`
+        # carries the flag.
+        # The three GRIST_* values are PLACEHOLDERS and nothing in the suite performs a real
+        # request with them: every HTTP call is mocked at the `requests` boundary and the
+        # Grist client is replaced by a recording double. tests/conftest.py setdefault()s the
+        # same three before anything can import src.settings, so the suite is green in a bare
+        # environment too; they are spelled out here so a CI run does not silently depend on
+        # that file keeping its defaults. `grist.invalid` sits in the RFC 2606 reserved TLD,
+        # so it cannot resolve even if something did try to use it.
+        # `--name` is what makes this container reachable AFTERWARDS, and it does not
+        # duplicate `--rm`: `--rm` is removal-on-exit performed by the daemon, and a step
+        # killed by its own `timeout-minutes` kills the docker CLI here on the runner, not
+        # the container over on the host's daemon — that container goes on running, never
+        # exits, so `--rm` never fires. Unnamed it would then be unreachable by the cleanup
+        # step below, which (like every cleanup in these workflows) removes containers BY
+        # NAME, and one timed-out test step would leak a container onto the shared daemon
+        # permanently.
+        tar -cf - --exclude=./.git --exclude=./.venv --exclude=./data \
+          --exclude=./.env --exclude=./.pytest_cache --exclude=__pycache__ . \
+          | docker run --rm -i --pull always --name "$TEST_NAME" \
+          -e GRIST_SERVER=http://grist.invalid \
+          -e GRIST_DOC_ID=test-doc \
+          -e GRIST_API_KEY=test-key \
+          -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+          -e PYTHONDONTWRITEBYTECODE=1 \
+          "$RUNTIME_IMAGE" \
+          sh -c 'set -e; mkdir -p /src; tar -xf - -C /src; cd /src; pip install --no-cache-dir -r requirements-dev.txt; pytest --tb=short -q'
+
+    - name: Remove the test container from the runner
+      # `always()` because the run this step exists for is precisely the one that failed or
+      # was killed. On a green run the container has exited and `--rm` has already removed
+      # it, so this does nothing; on the run where the step above hit its 20-minute bound,
+      # the docker CLI died on the runner while the container kept running on a daemon
+      # shared by every repository — and a cleanup that only fired on success would leave it
+      # there forever.
+      # Best-effort: `|| true` so a container that is already gone, or a docker that is
+      # momentarily unhappy, cannot turn a leftover into a red job and bury the actual
+      # verdict of the test suite under a cleanup error.
+      if: always()
+      run: |
+        docker rm -f -v "$TEST_NAME" || true
+
   build:
     runs-on: ubuntu-latest
+    needs: test                          # no green tests → no image is built
     # cirunner-hatbox is shared by every repository in the fleet, so a hung step does not
     # just stall this run — it holds a runner slot that everyone else is queueing for.
     # Gitea's own default is far too generous for that.
-    # The three step-level timeouts below come to 40 minutes (20 build + 5 smoke + 15
-    # push); 45 leaves 5 on top for checkout, the registry login and the two cleanup steps.
+    # The three step-level timeouts below come to 45 minutes (20 build + 10 smoke + 15
+    # push); 50 leaves 5 on top for checkout, the registry login and the two cleanup steps.
     # The outer bound has to EXCEED the sum, not equal it: act_runner kills the whole job
     # when this fires, and a step marked `if: always()` is not guaranteed to run afterwards
     # — so a job that dies mid-push leaves the smoke container and a ~400 MB image sitting
     # on the daemon the entire fleet shares.
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
     - uses: actions/checkout@v7
 
@@ -125,10 +252,10 @@ jobs:
     - name: Build the Docker image
       # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
       # the job-level one above is only the outer bound. 20 minutes is far above a
-      # realistic cold build: this is `python:3.9` plus a `pip install` of eleven pinned
-      # pure-python wheels (requests, grist-api, colorama, jsonpath-ng and their
-      # dependencies), which comes to roughly 400 MB and a couple of minutes. Nothing here
-      # compiles.
+      # realistic cold build: `python:3.9`, one `apt-get install gosu`, and a `pip install`
+      # of the pinned entries in requirements.txt — pure-python wheels (requests, grist-api,
+      # colorama and their dependencies) plus pydantic-core, which ships a manylinux wheel
+      # for cp39 and is not compiled here. The bulk of the ~400 MB is the non-slim base.
       timeout-minutes: 20
       env:
         # Through the environment, not interpolated into the script text: the only thing
@@ -152,45 +279,48 @@ jobs:
         docker build --pull . --file Dockerfile $tag_args
 
     - name: Smoke-test the built image
-      # There are no tests in this repo, so this is the only gate before :latest goes live.
-      # It sits BETWEEN build and push on purpose: a red smoke means nothing ever reaches
-      # the registry, so production keeps running the previous image. The Docker Hub
-      # workflow this replaces had nothing in this position at all.
+      # The second gate, after the test job. It sits BETWEEN build and push on purpose: a
+      # red smoke means nothing ever reaches the registry, so production keeps running the
+      # previous image. The Docker Hub workflow this replaces had nothing in this position
+      # at all.
+      #
+      # The pytest suite covers the logic; this covers what only an assembled image can
+      # answer — that every shipped file compiles AND imports under the image's own
+      # python:3.9, that PID 1 really is `python main.py` running as uid 1000 (so the
+      # entrypoint/gosu chain works), that the loop writes its heartbeat, that .dockerignore
+      # kept tests/, ci/, .env and .venv out of the image, that a stripped environment makes
+      # the program die with a message naming the missing variables, and that the probe
+      # answers correctly in each of its three states. See ci/smoke.py.
       #
       # The container is started with the image's OWN command — no `--entrypoint`, which
-      # does not merely replace the entrypoint but also DROPS the image's CMD. This image
-      # has no ENTRYPOINT at all, only
-      # `CMD while true; do python airdrop_checker.py; sleep 10; done`, so passing one
-      # would make "does the image's command actually run the script" unanswerable — and
-      # that is one of the three things ci/smoke.py checks.
+      # does not merely replace the entrypoint but also DROPS the image's CMD, and this
+      # image's ENTRYPOINT is exactly the part that drops privileges.
       #
-      # There is deliberately NO readiness loop here, unlike the web services in the fleet.
-      # Two reasons, and the second is the important one: airdrop_checker serves no HTTP of
-      # any kind, so there is no port to poll; and "the container is up" would prove
-      # nothing anyway, because the shell loop above keeps it running for ten seconds after
-      # every crash. A container that is running is entirely compatible with a script that
-      # dies on its first line. ci/smoke.py polls the container's own process table instead,
-      # with its own bounded loop, and reports what that bound is.
+      # Unlike the pre-refactor version of this file, docker's own health verdict IS waited
+      # for here, and that became possible for the same reason it became necessary: the CMD
+      # is now a direct `python main.py`, so the container only stays up when the program
+      # does, and with the placeholder configuration below the loop iterates and writes
+      # heartbeats. That makes "healthy" reachable — and it is the only check in the
+      # pipeline that exercises the Dockerfile's HEALTHCHECK LINE itself rather than the
+      # probe behind it.
       #
-      # No environment is passed, and none is needed. airdrop_checker's main() does not
-      # validate GRIST_SERVER, GRIST_DOC_ID or GRIST_API_KEY — it hands them on as None —
-      # so the script will fail somewhere in its first Grist call. That is expected and
-      # harmless here: not one of the checks in ci/smoke.py depends on the script getting
-      # anywhere. What it buys is that this gate holds no production credential and reaches
-      # no external API — neither Grist nor purrfolio.com — because a gate that reddens on
-      # somebody else's outage is a gate everybody learns to ignore.
+      # The gate still holds no production credential and reaches no external API — neither
+      # Grist nor purrfolio.com — because a gate that reddens on somebody else's outage is a
+      # gate everybody learns to ignore.
       #
       # Nothing is published to the host: the checks run from inside the container via
       # `docker exec`, so parallel runs on this shared daemon cannot collide on a host
       # port. The container name carries the run id for the same reason.
       #
       # Step-level `timeout-minutes`, the one act_runner is known to enforce (the job-level
-      # one is only the outer bound). 5 minutes is comfortable: ci/smoke.py's worst case is
-      # its ~20-30 s process-table poll plus a byte-compile and four imports — under a
-      # minute even on a busy runner. Being killed BY this timeout is what the margin is
-      # for: the `docker logs` below would not run, and the cleanup step would remove the
-      # container, leaving the failure with no diagnostics at all.
-      timeout-minutes: 5
+      # one is only the outer bound). 10 minutes covers the worst case with room to spare:
+      # up to 180 s waiting for the first HEALTHCHECK verdict (the image's interval is
+      # 60 s), then ci/smoke.py — a bounded ~30 s wait for the heartbeat to appear plus a
+      # bounded 40 s watch for it to MOVE, ten byte-compiles, thirteen imports, one startup
+      # run bounded at 60 s and three probe runs bounded at 30 s each. Being killed BY this timeout is what the margin is for: the `docker logs`
+      # below would not run, and the cleanup step would remove the container, leaving the
+      # failure with no diagnostics at all.
+      timeout-minutes: 10
       env:
         SMOKE_TAG: ${{ steps.tags.outputs.smoke }}
         NAME: airdrop-checker-smoke-${{ github.run_id }}
@@ -206,12 +336,65 @@ jobs:
         # container. Without this line the retry dies immediately on `docker run` with
         # "name already in use", and CI stays broken until somebody clears it by hand on
         # the shared runner host. A no-op on every run that has nothing left behind.
-        docker rm -f "$NAME" || true
+        docker rm -f -v "$NAME" || true
 
-        docker run -d --name "$NAME" "$SMOKE_TAG"
+        # PLACEHOLDER configuration, not credentials, and none of it reaches an external
+        # service: `grist.invalid` sits in the RFC 2606 reserved TLD, so the loop's first
+        # fetch fails on name resolution inside the container without a packet leaving the
+        # host, and purrfolio.com is never called because no wallet list ever arrives. It
+        # has to be passed at all because the CMD is a direct `python main.py` now — with a
+        # bare environment the container exits within a second, which is the documented
+        # behaviour and precisely what would make `docker exec` impossible. The check that
+        # NEEDS a bare environment builds one itself: ci/smoke.py strips these three again
+        # for its fail-loudly check.
+        docker run -d --name "$NAME" \
+          -e GRIST_SERVER=http://grist.invalid \
+          -e GRIST_DOC_ID=smoke-not-a-real-doc \
+          -e GRIST_API_KEY=smoke-not-a-real-key \
+          "$SMOKE_TAG"
+
+        # Wait for docker's OWN health verdict. This is the only place the Dockerfile's
+        # HEALTHCHECK line is exercised end to end: ci/smoke.py runs the probe itself, but
+        # it cannot see whether docker was told to run it, or told to run a module path
+        # that no longer exists — and an image whose HEALTHCHECK never goes green hands
+        # auto-heal a container it restarts forever, while every other check stays green.
+        # The EMPTY status gets a branch of its own rather than being read as "nothing to
+        # complain about": it means the image declares no HEALTHCHECK at all, which is
+        # exactly the state this repository was in before — the production container has
+        # carried `io.portainer.autoheal.enable` the whole time with nothing to act on.
+        # The image's interval is 60 s, so the first verdict lands about a minute in;
+        # 90 attempts two seconds apart is 180 s, three intervals.
+        attempt=0
+        state=""
+        health=""
+        while [ "$attempt" -lt 90 ]; do
+          info=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$NAME" 2>/dev/null) || info="gone gone"
+          state=${info%% *}
+          health=${info##* }
+          if [ "$state" != "running" ]; then
+            echo "container is '$state', not running; logs:"
+            docker logs "$NAME" || true
+            exit 1
+          fi
+          if [ "$health" = "nohealth" ]; then
+            echo "the image declares no HEALTHCHECK at all — auto-heal would have nothing to act on"
+            exit 1
+          fi
+          if [ "$health" = "healthy" ]; then
+            break
+          fi
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+        if [ "$health" != "healthy" ]; then
+          echo "container never became healthy (last verdict: '$health'); logs:"
+          docker logs "$NAME"
+          exit 1
+        fi
 
         # Fed over stdin, so the image does not have to carry the test file and the very
-        # same script can be run by hand against a local container.
+        # same script can be run by hand against a local container. Nothing is published to
+        # the host and nothing is polled over 127.0.0.1: `docker exec` is the only way in.
         #
         # `-u` is not decoration: this stdout is a pipe, and CPython block-buffers those.
         # A normal exit flushes (SystemExit(1) included, so a self-reported failure is
@@ -262,7 +445,7 @@ jobs:
       env:
         NAME: airdrop-checker-smoke-${{ github.run_id }}
       run: |
-        docker rm -f "$NAME" || true
+        docker rm -f -v "$NAME" || true
 
     - name: Remove the built images from the runner
       # The runner's docker daemon is persistent, so the images built here would otherwise

@@ -4,8 +4,35 @@ colorama==0.4.6
 future==1.0.0
 grist-api==0.1.0
 idna==3.9
-jsonpath-ng==1.6.1
-ply==3.11
+# Without this, a `socks5://` or `socks5h://` proxy string typed into the Grist
+# `Proxy` setting fails every request with "Missing dependencies for SOCKS
+# support" — requests needs PySocks to speak SOCKS at all. Nothing here imports
+# it by name, which is exactly why it has to be pinned explicitly: it is reached
+# through requests, so a reader looking for `import socks` finds nothing and
+# concludes it is dead weight.
 PySocks==1.7.1
 requests==2.32.3
 urllib3==2.2.3
+# Single configuration entry point (src/settings.py).
+pydantic-settings==2.7.0
+# pydantic-settings' own dependency closure, pinned like everything else in this file.
+# This file has always been a complete closure — even transitive names like certifi and
+# idna are pinned above — and leaving these five to float would have quietly ended
+# that: two builds of the same commit could produce different images, and a future
+# pydantic release incompatible with pydantic-settings 2.7.0, or one that drops python
+# 3.9, would break the build with no commit to blame it on.
+# Verified to resolve as prebuilt cp39 manylinux wheels for the image's interpreter, so
+# `pip install` does not fall back to compiling pydantic-core's Rust extension:
+#   pip download -r requirements.txt --only-binary=:all: \
+#       --python-version 3.9 --implementation cp --platform manylinux_2_17_x86_64
+pydantic==2.13.4
+pydantic-core==2.46.4
+annotated-types==0.7.0
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+# Reads .env for pydantic-settings' env_file support. python-dotenv, NOT the
+# unpinned `dotenv` distribution: that one is a deprecated squatter package which
+# only depends on this, while the import name the code needs is `dotenv` — which is
+# what python-dotenv provides. 1.1.1 is the newest release that still supports
+# python 3.9, the image's interpreter.
+python-dotenv==1.1.1
