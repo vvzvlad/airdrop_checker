@@ -938,11 +938,10 @@ def probe_privileges_rows():
     different process on a different path: docker starts a HEALTHCHECK outside the
     ENTRYPOINT, so it begins as root and drops privileges itself, in
     `src/healthcheck.py`. Nothing else in this pipeline can observe whether it did.
-    The unit tests certainly cannot: they replace the module's privilege primitives
-    and assert the SHAPE of the calls, and no test performs a real uid switch —
-    locally the probe returns early because it is not root, and in CI it runs inside
-    `python:3.9-slim`, which has no `app` account, so the non-fatal branch fires.
-    Delete `_setuid(...)` from the probe and every one of those tests still passes.
+    The unit tests certainly cannot: they replace the module's privilege primitives —
+    `_geteuid` among them, so the root branch runs on a suite that is not root — and
+    assert the SHAPE of the recorded calls. No test performs a real uid switch: empty
+    the body of `_setuid` in the probe and every one of those tests still passes.
 
     The oracle is the permission asymmetry described in make_probe_scratch_dir, used
     from the other side: a FRESH heartbeat inside a 0700 root-owned directory. Root

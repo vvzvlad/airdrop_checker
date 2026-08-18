@@ -17,7 +17,8 @@ src/settings.py         the ONLY place environment configuration is read
 src/config_errors.py    turns a pydantic ValidationError into a readable startup message
 src/checker.py          the loop: logger, Grist client, heartbeat, `while True`
 src/grist.py            thin wrapper over grist_api (column-name and datetime translation)
-src/balances.py         check_balance / generate_proxy / find_none_values / redact_credentials
+src/balances.py         check_balance / generate_proxy / find_none_values /
+                        redact_credentials / describe_error
 src/heartbeat.py        the liveness mark — stdlib only, see below
 src/healthcheck.py      the Docker HEALTHCHECK probe (`python -m src.healthcheck`)
 src/http_timeout.py     global default timeout for outgoing requests
@@ -216,11 +217,24 @@ switch fails for any other reason it says so on stderr and grades the heartbeat 
 a probe that exited there would report "unhealthy" for a reason that has nothing to do with
 the heartbeat, and hand auto-heal a restart loop.
 
-The four privilege primitives are called through one-line wrappers on the module
+The five privilege primitives are called through one-line wrappers on the module
 (`_geteuid`, `_setgroups`, `_setgid`, `_setuid`, `_getpwnam`). That is for the tests:
 `src.healthcheck.os` is the stdlib module object itself, so patching `geteuid` through it
-replaces it for the entire pytest process. It also means the unit tests can only pin the
-shape of the drop — the real switch is executed and observed only by `ci/smoke.py`.
+replaces it for the entire pytest process — every fixture, plugin and helper running in
+that window would be told it is root. It also means the unit tests can only pin the shape
+of the drop.
+
+**No test performs a real uid switch**, and the reason is those wrappers rather than the
+environment. The tests that examine the drop replace all five, `_geteuid` included — it
+answers 0, so the root branch runs on a suite that is not root — and record the calls. What
+they observe is the CALL, never its effect: empty a wrapper's body
+(`def _setuid(uid): pass`) and the whole suite stays green, while deleting the `_setuid(...)`
+CALL turns `test_a_root_probe_becomes_the_app_user_groups_first` red, because that one
+compares the exact call list. (The probe is also run unpatched, in a subprocess, by the
+heartbeat tests — but there it has nothing to do: locally it is not root and returns at the
+first branch, and in CI it is root inside `python:3.9-slim`, which has no `app` account, so
+`pwd.getpwnam("app")` raises and the non-fatal branch fires.) The real switch is executed
+and observed only by `ci/smoke.py`, group (l), against a live container.
 
 ## Tests
 
@@ -254,9 +268,9 @@ Tests that matter most, in the sense that they pin a decision rather than an imp
   reads the heartbeat. These patch the module's own `_geteuid`/`_setuid`/… wrappers, not
   `src.healthcheck.os` — that name IS the stdlib module, so patching through it would
   replace the primitives for the whole pytest process. They pin the SHAPE of the drop and
-  nothing more: no test performs a real uid switch (locally the probe is not root; in CI
-  it is root in an image with no `app` account), so the only place the switch is really
-  executed AND observed is the smoke gate, group (l);
+  nothing more: all five wrappers are replaced, `_geteuid` among them, so what is recorded
+  is the CALL and not its effect — no test performs a real uid switch, and the only place
+  the switch is really executed AND observed is the smoke gate, group (l);
 - `redact_credentials`, and a proxy failure travelling through `check_balance` without the
   password appearing in the log, in `str(exception)` or in what the loop writes to Grist —
   plus the passwords that hold a `/`, a space or an `@`, which the earlier pattern did not
@@ -265,6 +279,31 @@ Tests that matter most, in the sense that they pin a decision rather than an imp
 - every redaction site in `src/checker.py`, through a recording logger. Coverage does not
   help here: those lines are executed by the `run()` tests either way, and removing the
   redaction from any of them left the suite green until a test read what they produced;
+- the SHAPE of a reason — `describe_error`'s class name — at every site that reports one:
+  `check_balance`, the per-wallet handler, both lines of the round handler and the
+  outermost handler. Driven with a bare `requests.exceptions.ConnectionError()` (the class
+  the transport really raises, not the builtin that happens to share its name), which
+  stringifies to nothing, so an unnamed reason is a line that ends in its colon. The
+  `Fail:` line is asserted with `startswith` and not `in`, because it carries the formatted
+  traceback, which spells the class by itself — a containment check passes against exactly
+  the defect. The OTHER half of the same contract, that the redacted MESSAGE survives, is
+  pinned by the redaction tests beside them — unevenly, and that is not a defect to tidy
+  up. Of the five, two require the proxy's host AND port in the line they read, two
+  require the host alone, and the one covering the rendered chain requires neither: it
+  exists for what the chain must NOT contain. `tests/test_balances.py` is mixed the same
+  way. Each of the four host assertions is nevertheless the killer for a mutation on its
+  own line, and the port itself is pinned where it belongs — on `redact_credentials`, in
+  `tests/test_balances.py` — so widening the host-only ones buys nothing. Without that
+  half, a reason rebuilt from `type(e).__name__` satisfied "no password" by saying nothing
+  at all, and all three HANDLERS in `src/checker.py` accepted it. The round handler is
+  entered through the harness's `fail_generate_proxy` switch rather than through the
+  known-risk `Value`/`Comment` write, so the test does not stand on two column names this
+  document hands to the Grist owner. The mutation matrix is per LINE rather than per
+  handler, and the round handler reports on two lines: four reporting lines in
+  `src/checker.py` (the per-wallet `reason`, both round-handler lines, the outermost line)
+  × two defects (class name dropped, message dropped) = EIGHT mutations, plus two more for
+  `check_balance`'s own `reason` in `src/balances.py` — ten in all, each verified by
+  putting the defect back and watching the suite go red;
 - `src.healthcheck` not importing `src.settings` (checked over the import graph).
 
 ## CI

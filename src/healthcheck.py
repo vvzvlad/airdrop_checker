@@ -51,12 +51,19 @@ APP_USER = "app"
 #
 # Be honest about what that buys: the tests can then pin the SHAPE of the drop (that
 # it happens at all, in which order, and that a failure to drop is not fatal) and
-# nothing more. No test performs a real uid switch — locally the probe returns early
-# because it is not root, and in CI it runs as root inside `python:3.9-slim`, where
-# there is no `app` account and the non-fatal branch fires. The only place the real
-# switch is executed is `ci/smoke.py`, against a live container of the built image;
-# that is also the only place that can observe it, which is what group (l) of the
-# gate is for.
+# nothing more. No test performs a real uid switch. For the tests that EXAMINE the
+# drop the reason is these wrappers rather than the environment: they replace all
+# five, so `_geteuid` answers 0 and the root branch runs on a suite that is not root,
+# and what the assertions read afterwards is the recorded CALLS. Emptying one of the
+# bodies below is invisible to them; removing a call from drop_privileges is not.
+# (This module is also run UNPATCHED, in a subprocess, by the probe tests at the top
+# of tests/test_healthcheck.py — and there the environment is the whole reason, because
+# drop_privileges has nothing to do: locally the suite is not root and it returns at
+# the first branch, and in CI it is root inside `python:3.9-slim`, which the workflow
+# starts without `--user` and which has no `app` account, so `pwd.getpwnam` raises and
+# the non-fatal branch fires.) The only place the real switch is executed is
+# `ci/smoke.py`, against a live container; that is also the only place that can observe
+# it, which is what group (l) of the gate is for.
 def _geteuid():
     return os.geteuid()
 

@@ -9,6 +9,8 @@ schedule, forever, for doing exactly what it was configured to do.
 `time.sleep` is replaced throughout, so these tests take no real time.
 """
 
+import requests
+
 import src.checker
 from src.checker import HEARTBEAT_SLEEP_CHUNK, sleep_with_heartbeat
 from src.heartbeat import DEFAULT_HEARTBEAT_MAX_AGE
@@ -225,16 +227,26 @@ class _Harness:
 
 
 def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
-               fail_check_balance=None, fail_update=False):
+               fail_check_balance=None, fail_update=False, fail_generate_proxy=None):
     """Run `run()` for `iterations` turns and return the recorded events.
 
     Every boundary the loop has is replaced: the Grist client, wallet selection,
-    the balance lookup, BOTH sleep functions, the heartbeat writer, the module
-    logger and the process setup that would otherwise wrap stdout through colorama.
+    the balance lookup, the proxy preparation, BOTH sleep functions, the heartbeat
+    writer, the module logger and the process setup that would otherwise wrap stdout
+    through colorama.
 
     Each `fail_*` switch takes True, a message, or a ready exception object (see
     `_as_error`) — the last of those is what lets a test reproduce the exception
     SHAPE `check_balance` produces, redacted text on top of an unredacted __cause__.
+
+    `fail_generate_proxy` exists for one reason: it is the entry into the ROUND
+    handler that does not go through the failing `Value`/`Comment` write. That write
+    is the only live path into that handler today, and AGENTS.md flags it as the
+    Grist document owner's call to change; a test that could only reach the handler
+    that way would go red when the owner removed it — for the loss of the scenario,
+    not for the loss of the property under test. `generate_proxy` is the first
+    statement of the round's own body, so anything it raises arrives at the handler
+    exactly as the write does.
     """
     harness = _Harness()
     events = harness.events
@@ -262,6 +274,16 @@ def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
             raise _as_error(fail_check_balance, "balance lookup failed")
         return 1.0, 2.0
 
+    real_generate_proxy = src.checker.generate_proxy
+
+    def fake_generate_proxy(proxy_string):
+        events.append(("proxy",))
+        if fail_generate_proxy is not None:
+            raise _as_error(fail_generate_proxy, "the proxy setting is unusable")
+        # Otherwise the real one: the token substitution is what puts a proxy STRING
+        # in front of the wallet loop, and the redaction tests read that string.
+        return real_generate_proxy(proxy_string)
+
     def fake_sleep_with_heartbeat(seconds):
         # Deliberately does NOT call time.sleep: a raw `time.sleep` recorded below
         # can then only have come from the loop's own body.
@@ -284,6 +306,7 @@ def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
     monkeypatch.setattr(src.checker, "GRIST", fake_grist_factory)
     monkeypatch.setattr(src.checker, "find_none_values", fake_find_none_values)
     monkeypatch.setattr(src.checker, "check_balance", fake_check_balance)
+    monkeypatch.setattr(src.checker, "generate_proxy", fake_generate_proxy)
     monkeypatch.setattr(src.checker, "sleep_with_heartbeat", fake_sleep_with_heartbeat)
     monkeypatch.setattr(src.checker.time, "sleep", fake_time_sleep)
     monkeypatch.setattr(src.checker, "write_heartbeat", fake_write_heartbeat)
@@ -441,6 +464,23 @@ def test_a_completed_round_sleeps_the_grist_pause_through_the_chunked_sleep(monk
 
 PROXY_PASSWORD = "hunter2"
 PROXY_URL = "socks5://user:hunter2@proxy.invalid:1080"
+# What has to SURVIVE the redaction, alongside two of this file's four "no password"
+# checks: the round handler's and the outermost handler's, where the line under test
+# is the entire record of the failure. That check alone is satisfied by a line that
+# says nothing at all — which is what a reason rebuilt from `type(exception).__name__`
+# is, and what a reason rebuilt by deleting the message would be.
+#
+# The other two are narrower on purpose, not by oversight. The happy-path check names
+# the host without this constant, and the rendered-chain check asserts no survival at
+# all — it exists for what the chain must NOT contain. Widening either to the port was
+# tried and killed nothing further: a redaction that ate the port too already turns
+# test_the_outermost_handler_redacts_too red here, and
+# test_a_url_with_a_port_and_a_later_address_is_left_alone red in test_balances.py,
+# which is where the port's survival is pinned on `redact_credentials` itself.
+#
+# Host AND port here: the port is what names the exit on a proxy vendor that runs
+# several on one host.
+PROXY_HOST = "proxy.invalid:1080"
 # The shape urllib3 produces for a proxy whose scheme it cannot read — the message
 # quotes the whole URL, credentials and all.
 LEAKY_TEXT = "Unable to determine SOCKS version from socks9://user:hunter2@proxy.invalid:1080"
@@ -482,15 +522,37 @@ def test_the_happy_path_never_logs_the_proxy_with_its_password(monkeypatch):
 def test_a_failing_round_logs_neither_the_message_nor_the_traceback_unredacted(monkeypatch):
     # The inner handler. Both of its lines carry the exception text and one of them
     # carries the whole formatted traceback, so a leak here is two leaks.
+    #
+    # Reached through the known-risk `Value`/`Comment` write on purpose, unlike the
+    # class-name test below, which uses the proxy switch: that write is a Grist call
+    # made through `requests`, so a ProxyError quoting the whole proxy URL is the
+    # shape this handler really sees. If the owner ever drops those two columns, this
+    # test needs a new way in (`fail_generate_proxy` is one) rather than a rewrite.
     wallets = [_Wallet(1, "0xaaa")]
     harness = _drive_run(monkeypatch, wallets=wallets, iterations=1,
                          fail_check_balance=Exception("balance lookup failed"),
                          fail_update=RuntimeError(
                              "ProxyError: Cannot connect to proxy " + PROXY_URL))
-    assert [message for message in harness.logger.messages if message.startswith("Fail:")], \
-        harness.logger.messages
+    occurred = [message for message in harness.logger.messages
+                if message.startswith("Error occurred:")]
+    # Two: the wallet's own handler, whose exception says nothing secret, and the
+    # round's, whose exception carries the proxy URL.
+    assert len(occurred) == 2, harness.logger.messages
+    failed = [message for message in harness.logger.messages if message.startswith("Fail:")]
+    assert failed, harness.logger.messages
     assert not harness.logger.leaking(PROXY_PASSWORD), harness.logger.leaking(PROXY_PASSWORD)
-    assert any("proxy.invalid" in message for message in harness.logger.messages)
+    # The other half of the contract, and the half that was pinned nowhere: what
+    # survives the redaction is the REDACTED MESSAGE, not a bare class name. Rebuild
+    # either line from `type(e).__name__` alone and it satisfies "no password"
+    # perfectly — by saying nothing — while a proxy failure becomes undiagnosable.
+    # Only the `Fail:` line is cut at the first newline, and only it has anything
+    # behind one: the handler appends the formatted traceback to that line alone, and
+    # the traceback quotes the message again, so a whole-string check there would let
+    # the traceback answer for the reason. The `Error occurred:` line is the reason and
+    # nothing else, so it is read whole — the same asymmetry the class-name test below
+    # makes with `==` on one line and `startswith` on the other.
+    assert PROXY_HOST in occurred[1], occurred[1]
+    assert PROXY_HOST in failed[0].split("\n")[0], failed[0]
 
 
 def test_the_traceback_is_redacted_even_when_the_caught_exception_is_clean(monkeypatch):
@@ -519,25 +581,83 @@ def test_the_outermost_handler_redacts_too(monkeypatch):
     # the whole proxy URL in its text.
     harness = _drive_run(monkeypatch, iterations=1, fail_find_settings=RuntimeError(
         "ProxyError: Cannot connect to proxy " + PROXY_URL))
-    assert [message for message in harness.logger.messages
-            if message.startswith("Error occurred, sleep 10s:")], harness.logger.messages
+    lines = [message for message in harness.logger.messages
+             if message.startswith("Error occurred, sleep 10s:")]
+    assert lines, harness.logger.messages
     assert not harness.logger.leaking(PROXY_PASSWORD), harness.logger.leaking(PROXY_PASSWORD)
+    # And the host survives. This line is the ONLY trace such a round leaves — nothing
+    # is written to Grist on this path — so a reason reduced to a class name takes the
+    # whole diagnosis with it while passing every "no password" assertion above.
+    assert PROXY_HOST in lines[0], lines[0]
 
 
 def test_a_silent_exception_still_produces_a_named_reason(monkeypatch):
-    # `ConnectionError()` stringifies to nothing, so the old formatting wrote
-    # `Error: ` into the wallet's Grist `Comment` column — a cell that is read weeks
-    # later, when nobody can tell an empty exception from a redaction that ate the
-    # whole message.
+    # `requests.exceptions.ConnectionError()` stringifies to nothing, so the old
+    # formatting wrote `Error: ` into the wallet's Grist `Comment` column — a cell that
+    # is read weeks later, when nobody can tell an empty exception from a redaction that
+    # ate the whole message. The class is the one `requests` raises, as in the
+    # neighbouring test in tests/test_balances.py, and not the builtin it shares a
+    # __name__ with — an assertion that cannot tell them apart is an assertion about
+    # nothing.
     wallets = [_Wallet(1, "0xaaa")]
     harness = _drive_run(monkeypatch, wallets=wallets, iterations=1,
-                         fail_check_balance=ConnectionError())
+                         fail_check_balance=requests.exceptions.ConnectionError())
     comments = [updates["Comment"] for _, updates in harness.grist.updates
                 if "Comment" in updates]
     assert comments, harness.grist.updates
     assert all(comment.strip() != "Error:" for comment in comments), comments
     assert all("ConnectionError" in comment for comment in comments), comments
     assert any("ConnectionError" in message for message in harness.logger.messages)
+
+
+def test_the_round_handler_names_the_class_of_what_it_caught(monkeypatch):
+    # The wallet's own handler was covered by the test above; these two lines were
+    # not, and a mutation that rebuilt them from `redact_credentials` alone — i.e.
+    # dropped the class name — left the whole suite green.
+    #
+    # Entered through the proxy-preparation switch, NOT through the known-risk
+    # `Value`/`Comment` write: that write is the only path into this handler the
+    # running service has today, and AGENTS.md hands the two column names to the
+    # Grist document's owner. Standing this test on it would mean going red the day
+    # the owner acts — for the disappearance of the scenario, not of the property.
+    # `requests.exceptions.ConnectionError` rather than the builtin of the same name:
+    # what this loop catches comes out of `requests`, and neither class is the other
+    # (both descend from OSError and there the relation ends) — sharing a __name__ is
+    # the only reason a builtin ever passed the assertion below. It stringifies to
+    # nothing, so an unnamed reason shows up as a line
+    # ending in its colon and nothing else. The proxy preparation does not raise this
+    # class in production — it is the SHAPE that is under test, and the handler
+    # cannot tell where inside the round its exception came from.
+    harness = _drive_run(monkeypatch, iterations=1,
+                         fail_generate_proxy=requests.exceptions.ConnectionError())
+    occurred = [message for message in harness.logger.messages
+                if message.startswith("Error occurred:")]
+    # Exactly one line, matched whole: this handler is the only one that ran, and an
+    # equality check is what refuses a reason that is only a colon.
+    assert occurred == ["Error occurred: ConnectionError"], harness.logger.messages
+
+    failed = [message for message in harness.logger.messages
+              if message.startswith("Fail:")]
+    assert failed, harness.logger.messages
+    # startswith, NOT `in`: this line carries the formatted traceback, which spells
+    # the exception's class by itself. A containment check would pass against a
+    # `Fail: ` with an empty reason and a traceback behind it — the exact defect.
+    assert failed[0].startswith("Fail: ConnectionError"), failed[0]
+
+
+def test_the_outermost_handler_names_the_class_of_what_it_caught(monkeypatch):
+    # The settings fetches sit under this handler, and a transport failure there is
+    # routinely a bare `requests.exceptions.ConnectionError()` — the same class the
+    # neighbouring test in tests/test_balances.py drives this scenario with, and not
+    # the builtin that merely shares its name. This line is the only trace such a
+    # round leaves anywhere — nothing is written to Grist on this path — so a reason
+    # that is only a colon is the whole record of what went wrong.
+    harness = _drive_run(monkeypatch, iterations=1,
+                         fail_find_settings=requests.exceptions.ConnectionError())
+    lines = [message for message in harness.logger.messages
+             if message.startswith("Error occurred, sleep 10s:")]
+    assert lines, harness.logger.messages
+    assert lines[0] == "Error occurred, sleep 10s: ConnectionError", lines
 
 
 def test_a_wallet_error_reaches_grist_with_the_proxy_credentials_stripped(monkeypatch):

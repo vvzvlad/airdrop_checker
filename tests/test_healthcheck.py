@@ -147,13 +147,19 @@ def test_probe_does_not_import_the_application_settings():
 # not become a new way for a healthy container to be scored unhealthy.
 #
 # WHAT THESE DO NOT TEST, stated plainly because the gap is easy to mistake for
-# coverage: none of them performs a real privilege drop. Locally the suite runs as
-# an ordinary user and the probe returns early; in CI it runs as root inside
-# `python:3.9-slim`, which has no `app` account, so `pwd.getpwnam` raises and the
-# non-fatal branch fires. What is pinned is the SHAPE of the drop — that it happens,
-# in the right order, and that a failure to perform it is not fatal. The only place
-# the switch is really executed AND observed is `ci/smoke.py`, group (l), against a
-# live container of the built image.
+# coverage: none of them performs a real privilege drop, and the reason is the patching
+# rather than the environment. `_patch_drop` replaces all five primitives, `_geteuid`
+# included — it answers 0, so the root branch runs on a suite that is not root — and the
+# assertions then read the recorded CALLS. Empty a wrapper's body in src/healthcheck.py
+# (`def _setuid(uid): pass`) and nothing here notices; delete the CALL and
+# test_a_root_probe_becomes_the_app_user_groups_first goes red on the call list.
+# (The subprocess probe further up does run drop_privileges unpatched — but it has
+# nothing to do there: locally the suite is not root and the probe returns at the first
+# branch, and in CI it is root inside `python:3.9-slim`, which has no `app` account, so
+# `pwd.getpwnam` raises and the non-fatal branch fires.)
+# What is pinned is the SHAPE of the drop — that it happens, in the right order, and
+# that a failure to perform it is not fatal. The only place the switch is really
+# executed AND observed is `ci/smoke.py`, group (l), against a live container.
 #
 # They patch `src.healthcheck._geteuid` and friends — the module's own one-line
 # wrappers — and NOT `src.healthcheck.os.geteuid`. The latter is the stdlib module
