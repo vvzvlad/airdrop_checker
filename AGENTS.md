@@ -389,8 +389,12 @@ Two entries whose reason is not visible from the code:
 `jsonpath-ng` and `ply` were removed: the only code importing them (`get_value_by_jsonpath`,
 `parse_and_sum_jsonpaths`) was never called from anywhere.
 
-The base image stays `python:3.9`. It is end-of-life and moving off it is worth doing, but
-that is a separate change with its own testing.
+The base image is `python:3.9-slim`. The 3.9 line itself stays: it is end-of-life and moving
+off it is worth doing, but that is a separate change with its own testing. Only the variant
+changed — the full image carried a 656 MB build-toolchain layer (gcc, make, `*-dev`) that
+exists to compile CPython once and is dead weight at runtime, while nothing here compiles:
+every requirement resolves to a prebuilt wheel. No extra apt package was needed for the
+switch either, because the HEALTHCHECK is `python -m src.healthcheck` and not an HTTP probe.
 
 ## Conventions
 

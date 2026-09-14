@@ -1,9 +1,15 @@
-# python:3.9 is kept deliberately. It is end-of-life and a move to a supported
-# base is worth doing, but it is a separate decision with its own testing — the
-# layout refactor does not carry it. Note this is the FULL image, not -slim, so
-# curl and friends are already present and no extra apt package is needed for
-# them.
-FROM python:3.9
+# python:3.9-slim. The 3.9 line is end-of-life and moving to a supported one is
+# worth doing, but that is a separate decision with its own testing and is not
+# carried here — this change is only about the variant.
+#
+# The full image put this at 1.12 GB, of which the service is 25 MB (21 MB of
+# wheels, 4 MB of gosu, 44 KB of source). The rest is base layers, and a single
+# 656 MB one is the build toolchain (gcc, make, *-dev) that the official image
+# needs once to compile CPython and that is dead weight at runtime. Nothing here
+# compiles — every requirement installs from a prebuilt wheel.
+# No curl is needed either: the HEALTHCHECK below runs `python -m src.healthcheck`,
+# a heartbeat-file probe with no HTTP in it.
+FROM python:3.9-slim
 
 WORKDIR /app
 

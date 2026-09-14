@@ -166,7 +166,7 @@ jobs:
     # (20 build + 10 smoke = 30 minutes) are the ones act_runner actually enforces, and 50
     # leaves the rest for checkout and the two cleanup steps. It must stay above their sum:
     # a job killed by this timeout may never run its `if: always()` cleanup, leaving a
-    # container and a ~400 MB image on the docker daemon shared by the whole fleet.
+    # container and a 147 MB image on the docker daemon shared by the whole fleet.
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v7
@@ -184,10 +184,10 @@ jobs:
     - name: Build the Docker image
       # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
       # the job-level one above is only the outer bound. 20 minutes is far above a
-      # realistic cold build: `python:3.9`, one `apt-get install gosu`, and a `pip install`
-      # of the pinned entries in requirements.txt — pure-python wheels plus pydantic-core,
-      # which ships a manylinux wheel for cp39 and is not compiled here. The bulk of the
-      # ~400 MB is the non-slim python:3.9 base.
+      # realistic cold build: `python:3.9-slim`, one `apt-get install gosu`, and a
+      # `pip install` of the pinned entries in requirements.txt — pure-python wheels plus
+      # pydantic-core, which ships a manylinux wheel for cp39 and is not compiled here.
+      # That comes to 147 MB; on the full base the same image was 1.12 GB.
       # Same number as in image-check-publish.yml: the two gates build the identical
       # Dockerfile and must not disagree about how long that is allowed to take.
       timeout-minutes: 20
@@ -198,7 +198,7 @@ jobs:
       run: |
         # --pull for the same reason as in image-check-publish.yml: cirunner-hatbox is
         # self-hosted with a persistent docker daemon, so without the flag a stale
-        # python:3.9 could sit in the cache for months — and that base is already
+        # python:3.9-slim could sit in the cache for months — and that base is already
         # end-of-life, so its fixes only ever arrive as new digests behind the same tag.
         # And as there, this is a BuildKit build despite the absence of `docker buildx` —
         # that has been `docker build`'s default since Engine 23.0.

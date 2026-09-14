@@ -179,7 +179,7 @@ jobs:
     # push); 50 leaves 5 on top for checkout, the registry login and the two cleanup steps.
     # The outer bound has to EXCEED the sum, not equal it: act_runner kills the whole job
     # when this fires, and a step marked `if: always()` is not guaranteed to run afterwards
-    # — so a job that dies mid-push leaves the smoke container and a ~400 MB image sitting
+    # — so a job that dies mid-push leaves the smoke container and a 147 MB image sitting
     # on the daemon the entire fleet shares.
     timeout-minutes: 50
     steps:
@@ -252,10 +252,12 @@ jobs:
     - name: Build the Docker image
       # Step-level `timeout-minutes` is the one known to be enforced by Gitea's act_runner;
       # the job-level one above is only the outer bound. 20 minutes is far above a
-      # realistic cold build: `python:3.9`, one `apt-get install gosu`, and a `pip install`
-      # of the pinned entries in requirements.txt — pure-python wheels (requests, grist-api,
-      # colorama and their dependencies) plus pydantic-core, which ships a manylinux wheel
-      # for cp39 and is not compiled here. The bulk of the ~400 MB is the non-slim base.
+      # realistic cold build: `python:3.9-slim`, one `apt-get install gosu`, and a
+      # `pip install` of the pinned entries in requirements.txt — pure-python wheels
+      # (requests, grist-api, colorama and their dependencies) plus pydantic-core, which
+      # ships a manylinux wheel for cp39 and is not compiled here. That comes to 147 MB;
+      # on the full base the same image was 1.12 GB, most of it a build toolchain that
+      # exists to compile CPython once and that nothing here ever uses.
       timeout-minutes: 20
       env:
         # Through the environment, not interpolated into the script text: the only thing
@@ -269,7 +271,7 @@ jobs:
         for tag in $TAGS; do tag_args="$tag_args --tag $tag"; done
         # --pull is required here: unlike GitHub's ephemeral runners, cirunner-hatbox is
         # self-hosted with a persistent docker daemon, so without the flag the once pulled
-        # python:3.9 would sit in its cache for months and every build would inherit an
+        # python:3.9-slim would sit in its cache for months and every build would inherit an
         # unpatched base layer. That matters more than usual on a base that is already
         # end-of-life and only ever gets fixes as new digests behind the same tag.
         # Note that this IS a BuildKit build even though no `docker buildx` appears on the
@@ -424,8 +426,10 @@ jobs:
         password: ${{ secrets.REGISTRY_TOKEN }}
 
     - name: Push Docker images
-      # 15 minutes for a ~400 MB payload of pure-python wheels on top of the python:3.9
-      # base. That is generous on a healthy link and meant to be: a bound too tight would
+      # 15 minutes for a 147 MB image: gitea.vvzvlad.xyz holds no python:3.9-slim layers of
+      # its own, so the base travels too the first time each digest is seen, and even then
+      # this is under a sixth of what the same push carried on the full base.
+      # That is generous on a healthy link and meant to be: a bound too tight would
       # abort a push that was making perfectly good progress, leaving a half-pushed :<sha>
       # and no :latest.
       timeout-minutes: 15
@@ -455,7 +459,7 @@ jobs:
       # It does NOT reclaim everything: `docker rmi <tag>` never touches the BuildKit cache
       # (that lives in a separate builder store and is only freed by
       # `docker builder prune`), and `--pull` above leaves the previous base image untagged
-      # as a dangling image whenever upstream publishes a new python:3.9 digest. Both need
+      # as a dangling image whenever upstream publishes a new python:3.9-slim digest. Both need
       # a separate periodic cleanup on the runner host.
       # `always()` so the cleanup runs even when the smoke or the push above fails.
       if: always()
