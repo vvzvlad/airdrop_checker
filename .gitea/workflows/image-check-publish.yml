@@ -254,7 +254,7 @@ jobs:
       # the job-level one above is only the outer bound. 20 minutes is far above a
       # realistic cold build: `python:3.9-slim`, one `apt-get install gosu`, and a
       # `pip install` of the pinned entries in requirements.txt — pure-python wheels
-      # (requests, grist-api, colorama and their dependencies) plus pydantic-core, which
+      # (requests, grist-client, colorama and their dependencies) plus pydantic-core, which
       # ships a manylinux wheel for cp39 and is not compiled here. That comes to 147 MB;
       # on the full base the same image was 1.12 GB, most of it a build toolchain that
       # exists to compile CPython once and that nothing here ever uses.

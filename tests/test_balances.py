@@ -416,7 +416,7 @@ class _FakeGrist:
     def __init__(self, wallets):
         self.wallets = wallets
 
-    def fetch_table(self, table=None):
+    def fetch_table(self, table):
         # A fresh list every call: the function shuffles what it is handed, and a
         # shared list would make one test's ordering leak into the next.
         return list(self.wallets)
@@ -431,7 +431,7 @@ def test_only_wallets_with_an_address_and_a_gap_are_returned():
         _Wallet(5, "0xccc", 1.0, ""),                          # hyperevm empty
         _Wallet(6, "0xddd", "", None),                         # both missing
     ])
-    picked = find_none_values(grist, count=10)
+    picked = find_none_values(grist, "Wallets", count=10)
     assert [wallet.id for wallet in picked] == [4, 5, 6]
 
 
@@ -439,17 +439,17 @@ def test_an_addressless_wallet_is_skipped_even_with_both_values_missing():
     # The address is what the lookup is performed on, so a row without one can
     # never be completed and must not consume a slot in the round.
     grist = _FakeGrist([_Wallet(1, ""), _Wallet(2, "0xaaa", None, None)])
-    assert [wallet.id for wallet in find_none_values(grist, count=10)] == [2]
+    assert [wallet.id for wallet in find_none_values(grist, "Wallets", count=10)] == [2]
 
 
 def test_the_result_is_cut_to_count():
     grist = _FakeGrist([_Wallet(n, "0x{}".format(n), None, None) for n in range(1, 11)])
-    assert len(find_none_values(grist, count=3)) == 3
+    assert len(find_none_values(grist, "Wallets", count=3)) == 3
 
 
 def test_count_defaults_to_one_wallet():
     grist = _FakeGrist([_Wallet(n, "0x{}".format(n), None, None) for n in range(1, 6)])
-    assert len(find_none_values(grist)) == 1
+    assert len(find_none_values(grist, "Wallets")) == 1
 
 
 def test_do_random_false_preserves_the_table_order():
@@ -457,8 +457,8 @@ def test_do_random_false_preserves_the_table_order():
     # helper that shuffled unconditionally would make every test above flaky and
     # would hide an ordering bug behind "it is random anyway".
     grist = _FakeGrist([_Wallet(n, "0x{}".format(n), None, None) for n in range(1, 21)])
-    assert [wallet.id for wallet in find_none_values(grist, count=20)] == list(range(1, 21))
-    assert [wallet.id for wallet in find_none_values(grist, do_random=False, count=20)] == \
+    assert [wallet.id for wallet in find_none_values(grist, "Wallets", count=20)] == list(range(1, 21))
+    assert [wallet.id for wallet in find_none_values(grist, "Wallets", do_random=False, count=20)] == \
         list(range(1, 21))
 
 
@@ -474,6 +474,6 @@ def test_do_random_true_shuffles_both_before_and_after_filtering(monkeypatch):
     monkeypatch.setattr(src.balances.random, "shuffle", recording_shuffle)
     grist = _FakeGrist([_Wallet(n, "0x{}".format(n), None, None) for n in range(1, 6)]
                        + [_Wallet(99, "0xdone", 1.0, 2.0)])
-    find_none_values(grist, do_random=True, count=2)
+    find_none_values(grist, "Wallets", do_random=True, count=2)
     # First the whole fetched table (6 rows), then the filtered candidates (5).
     assert shuffled == [6, 5]

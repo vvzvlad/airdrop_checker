@@ -16,12 +16,10 @@ main.py                 thin entry point; `from src.checker import run`
 src/settings.py         the ONLY place environment configuration is read
 src/config_errors.py    turns a pydantic ValidationError into a readable startup message
 src/checker.py          the loop: logger, Grist client, heartbeat, `while True`
-src/grist.py            thin wrapper over grist_api (column-name and datetime translation)
 src/balances.py         check_balance / generate_proxy / find_none_values /
                         redact_credentials / describe_error
 src/heartbeat.py        the liveness mark — stdlib only, see below
 src/healthcheck.py      the Docker HEALTHCHECK probe (`python -m src.healthcheck`)
-src/http_timeout.py     global default timeout for outgoing requests
 tests/                  pytest suite; offline, everything mocked
 ci/smoke.py             the CI gate, run inside a live container of the built image
 ```
@@ -50,10 +48,7 @@ probe watches another, so the container stays `unhealthy` forever. Production ne
 this, because there is no `.env` there and `ci/smoke.py` fails the build if one reaches the
 image; locally it bites.
 
-A missing variable exits(1) at startup with a message naming it. That is deliberate and is
-the defect this layout fixed: the old single-file version read the three with `os.getenv`,
-never checked them, and handed `None` straight to `GristDocAPI` — so an unconfigured
-container died deep inside its first HTTP call with a message that named nothing.
+A missing variable exits(1) at startup with a message naming it.
 
 Nothing outside `src/settings.py` may call `os.getenv` for configuration. The one exception
 is `src/healthcheck.py`, and it is explained there: the probe reads the environment
@@ -62,7 +57,7 @@ reason and hide the heartbeat verdict it exists to give.
 
 ## Grist names you must not "fix"
 
-The document belongs to someone else and `find_settings` raises on a name it cannot find,
+The document belongs to someone else and `get_setting` raises on a name it cannot find,
 so every one of these strings is load-bearing exactly as spelled:
 
 - Tables: `Wallets`, `Settings`.
@@ -72,7 +67,7 @@ so every one of these strings is load-bearing exactly as spelled:
 - Wallet columns read: `Address`, `hypercore_hype_value`, `hyperevm_hype_value`.
 - Wallet columns written on success: `hypercore_hype_value`, `hyperevm_hype_value`.
 
-`src/grist.py` rewrites spaces to underscores on the way out, because Grist accepts a
+`grist_client` rewrites spaces to underscores on the way out, because Grist accepts a
 column by its identifier while the document's labels carry spaces.
 
 ## Known risk: the error path writes different columns
@@ -156,12 +151,8 @@ Everything here is a deliberate departure from the old single-file `airdrop_chec
 each one is observable in production. Listed so a future reader finds them as decisions
 rather than as surprises:
 
-- **A 30-second default timeout on every outgoing `requests` call**
-  (`src/http_timeout.py`, installed at the top of `run()`). Carried over from
-  debank_checker. `grist_api` sends its requests without any timeout at all, so a stalled
-  TCP connection to Grist hangs this process forever — and there is no watchdog here to
-  notice. Explicit timeouts win: the `timeout=10` on each purrfolio call is preserved,
-  because the patch only fills the value in when the caller left it unset.
+- **A 30-second timeout on every Grist request**, set by `grist_client`: there is no
+  watchdog here to notice a hung call. Each purrfolio call passes its own `timeout=10`.
 - **The logger is named `airdrop_checker`, not `Token checker`.** The old name was
   copy-paste from a sibling service and named the wrong program, but it is visible in every
   production log line, so anything grepping `docker logs` for it needs to be updated.
@@ -245,12 +236,10 @@ make run         # the loop, needs a filled .env
 make clean
 ```
 
-Everything is offline: HTTP is mocked at the `requests` boundary, `GristDocAPI` is replaced
-by a recording double, `time.sleep` is replaced where the loop sleeps. `tests/conftest.py`
-seeds the three required variables before anything can import `src.settings`, and carries an
-autouse fixture that fails any test which leaves `src.http_timeout`'s module state altered —
-that module holds the only mutable module-level state in the package, and a second wrapper
-stacked on `Session.request` would quietly double every timeout in the process.
+Everything is offline: HTTP is mocked at the `requests` boundary, the Grist client is
+replaced by a recording double, `time.sleep` is replaced where the loop sleeps.
+`tests/conftest.py` seeds the three required variables before anything can import
+`src.settings`.
 
 Tests that matter most, in the sense that they pin a decision rather than an implementation:
 

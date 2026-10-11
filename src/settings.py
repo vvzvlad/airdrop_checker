@@ -5,12 +5,6 @@ Every environment variable the program reads is declared here; nothing else call
 a message naming it (see `src/config_errors.py`), never with a `None` travelling
 into a client.
 
-That last sentence is the defect this file was added for. The old top-level
-`airdrop_checker.py` read the three Grist variables with `os.getenv` and handed
-them straight to `GristDocAPI` without a single check, so an unconfigured
-container died somewhere inside its first HTTP call with a message that named
-neither the variable nor the fact that one was missing.
-
 The three variable NAMES below are a production contract: they are what the
 `crypt-common` stack on nebula feeds the `airdropchecker` container. Renaming any
 of them takes production down.
