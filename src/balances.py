@@ -208,7 +208,7 @@ def check_balance(address, logger, proxy=None):
         raise Exception(f"Error while checking token transactions for address {address}: {reason}") from None
 
 
-def find_none_values(grist, table=None, do_random=False, count=1):
+def find_none_values(grist, table, do_random=False, count=1):
     """Up to `count` wallets that have an address and are still missing a value.
 
     Shuffled twice on purpose, and both shuffles are the original behaviour: the

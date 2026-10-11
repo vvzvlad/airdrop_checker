@@ -10,6 +10,7 @@ schedule, forever, for doing exactly what it was configured to do.
 """
 
 import requests
+from grist_client import GristError
 
 import src.checker
 from src.checker import HEARTBEAT_SLEEP_CHUNK, sleep_with_heartbeat
@@ -172,18 +173,18 @@ class _RecordingLogger:
 class _FakeGrist:
     """Records every Grist touch, and can be made to fail on any of them."""
 
-    def __init__(self, events, settings_values, iterations, fail_find_settings=False,
+    def __init__(self, events, settings_values, iterations, fail_get_setting=False,
                  fail_update=False):
         self.events = events
         self.settings_values = settings_values
         self.iterations = iterations
         self.turns = 0
-        self.fail_find_settings = fail_find_settings
+        self.fail_get_setting = fail_get_setting
         self.fail_update = fail_update
         self.updates = []
         events.append(("grist_init",))
 
-    def find_settings(self, setting, table=None):
+    def get_setting(self, table, setting):
         # The "Proxy" lookup is the first statement of every iteration, so it is
         # where the turns are counted — and counting them HERE rather than further
         # down the round is what lets the error-branch tests terminate: those
@@ -193,17 +194,17 @@ class _FakeGrist:
             if self.turns > self.iterations:
                 raise _StopTheLoop()
         self.events.append(("settings", setting))
-        if self.fail_find_settings:
-            raise _as_error(self.fail_find_settings, "Grist is unreachable")
+        if self.fail_get_setting:
+            raise _as_error(self.fail_get_setting, "Grist is unreachable")
         return self.settings_values[setting]
 
-    def update(self, row_id, updates, table=None):
+    def update(self, table, row_id, updates):
         self.events.append(("update", row_id, tuple(sorted(updates))))
         self.updates.append((row_id, dict(updates)))
         if self.fail_update:
             raise _as_error(self.fail_update, "Grist rejected the batch")
 
-    def fetch_table(self, table=None):
+    def fetch_table(self, table):
         self.events.append(("fetch_table",))
         return []
 
@@ -226,7 +227,7 @@ class _Harness:
         return [event[0] for event in self.events]
 
 
-def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
+def _drive_run(monkeypatch, wallets=(), iterations=1, fail_get_setting=False,
                fail_check_balance=None, fail_update=False, fail_generate_proxy=None):
     """Run `run()` for `iterations` turns and return the recorded events.
 
@@ -260,11 +261,11 @@ def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
 
     def fake_grist_factory(*args, **kwargs):
         harness.grist = _FakeGrist(events, settings_values, iterations,
-                                   fail_find_settings=fail_find_settings,
+                                   fail_get_setting=fail_get_setting,
                                    fail_update=fail_update)
         return harness.grist
 
-    def fake_find_none_values(grist, table=None, do_random=False, count=1):
+    def fake_find_none_values(grist, table, do_random=False, count=1):
         events.append(("wallets", count))
         return list(wallets)
 
@@ -295,22 +296,18 @@ def _drive_run(monkeypatch, wallets=(), iterations=1, fail_find_settings=False,
     def fake_write_heartbeat(path, logger=None):
         events.append(("mark",))
 
-    def fake_install_default_timeout(*args, **kwargs):
-        events.append(("timeout_installed",))
-
     class _FakeColorama:
         @staticmethod
         def init(*args, **kwargs):
             events.append(("colorama_init",))
 
-    monkeypatch.setattr(src.checker, "GRIST", fake_grist_factory)
+    monkeypatch.setattr(src.checker, "GristClient", fake_grist_factory)
     monkeypatch.setattr(src.checker, "find_none_values", fake_find_none_values)
     monkeypatch.setattr(src.checker, "check_balance", fake_check_balance)
     monkeypatch.setattr(src.checker, "generate_proxy", fake_generate_proxy)
     monkeypatch.setattr(src.checker, "sleep_with_heartbeat", fake_sleep_with_heartbeat)
     monkeypatch.setattr(src.checker.time, "sleep", fake_time_sleep)
     monkeypatch.setattr(src.checker, "write_heartbeat", fake_write_heartbeat)
-    monkeypatch.setattr(src.checker, "install_default_timeout", fake_install_default_timeout)
     monkeypatch.setattr(src.checker, "colorama", _FakeColorama)
     monkeypatch.setattr(src.checker, "logger", harness.logger)
 
@@ -350,15 +347,6 @@ def test_the_first_mark_is_written_before_the_first_grist_call(monkeypatch):
             len(marks_before), events[:first_grist_call + 1])
 
 
-def test_the_request_timeout_is_installed_before_the_grist_client_exists(monkeypatch):
-    # grist_api sends its requests without a timeout, so the patch has to be in
-    # place before anything can call out. Installed late, it protects every
-    # request except the one already hanging.
-    events = _drive_run(monkeypatch, iterations=1).events
-    assert events.index(("timeout_installed",)) < _index(
-        events, lambda event: event[0] in ("grist_init", "settings", "fetch_table"))
-
-
 def test_every_iteration_starts_with_a_mark(monkeypatch):
     # Three turns, so this cannot pass on the strength of the startup mark alone.
     events = _drive_run(monkeypatch, iterations=3).events
@@ -372,7 +360,7 @@ def test_every_iteration_starts_with_a_mark(monkeypatch):
 
 
 def test_the_round_is_marked_between_the_settings_block_and_the_wallets(monkeypatch):
-    # Five find_settings calls plus the wallet fetch are six HTTP round trips, and
+    # Five get_setting calls plus the wallet fetch are six HTTP round trips, and
     # then the per-wallet work begins. Two marks have to sit between the wallet
     # selection and the first balance lookup: one closing the settings block, one
     # opening the first wallet.
@@ -408,7 +396,7 @@ def test_the_loop_never_sleeps_through_time_sleep_directly(monkeypatch):
     # a stretch with no mark, and it is how the chunking gets quietly undone.
     wallets = [_Wallet(1, "0xaaa")]
     for kwargs in ({}, {"wallets": wallets},
-                   {"fail_find_settings": True},
+                   {"fail_get_setting": True},
                    {"wallets": wallets, "fail_check_balance": "boom", "fail_update": True}):
         events = _drive_run(monkeypatch, iterations=2, **kwargs).events
         assert not [event for event in events if event[0] == "time.sleep"], \
@@ -421,7 +409,7 @@ def test_a_failing_grist_fetch_sleeps_ten_seconds_with_heartbeats_and_retries(mo
     # The outer handler. A service whose Grist is down keeps marking itself alive,
     # which is correct: it is a service problem, not a hung process, and
     # restarting it would not help.
-    events = _drive_run(monkeypatch, iterations=2, fail_find_settings=True).events
+    events = _drive_run(monkeypatch, iterations=2, fail_get_setting=True).events
     assert ("sleep_hb", 10) in events
     assert len([event for event in events if event == ("settings", "Proxy")]) >= 2
 
@@ -576,10 +564,10 @@ def test_the_traceback_is_redacted_even_when_the_caught_exception_is_clean(monke
 
 
 def test_the_outermost_handler_redacts_too(monkeypatch):
-    # The settings fetches sit under this one, and they go out through `requests`:
-    # an HTTP(S)_PROXY in the stack's environment arrives here as a ProxyError with
-    # the whole proxy URL in its text.
-    harness = _drive_run(monkeypatch, iterations=1, fail_find_settings=RuntimeError(
+    # The settings fetches sit under this one, and they go out through `requests`
+    # inside grist_client: an HTTP(S)_PROXY in the stack's environment arrives here
+    # as a GristError quoting the ProxyError, the whole proxy URL included.
+    harness = _drive_run(monkeypatch, iterations=1, fail_get_setting=RuntimeError(
         "ProxyError: Cannot connect to proxy " + PROXY_URL))
     lines = [message for message in harness.logger.messages
              if message.startswith("Error occurred, sleep 10s:")]
@@ -646,18 +634,18 @@ def test_the_round_handler_names_the_class_of_what_it_caught(monkeypatch):
 
 
 def test_the_outermost_handler_names_the_class_of_what_it_caught(monkeypatch):
-    # The settings fetches sit under this handler, and a transport failure there is
-    # routinely a bare `requests.exceptions.ConnectionError()` — the same class the
-    # neighbouring test in tests/test_balances.py drives this scenario with, and not
-    # the builtin that merely shares its name. This line is the only trace such a
-    # round leaves anywhere — nothing is written to Grist on this path — so a reason
-    # that is only a colon is the whole record of what went wrong.
-    harness = _drive_run(monkeypatch, iterations=1,
-                         fail_find_settings=requests.exceptions.ConnectionError())
+    # The settings fetches sit under this handler, and grist_client wraps a transport
+    # failure there in a GristError. One that carries no message of its own (a bare
+    # ConnectionError(), as here) leaves the text at just "Grist request failed: ".
+    # Nothing is written to Grist on this path, so this line is the whole record of
+    # the round and has to name the class.
+    error = GristError("Grist request failed: ")
+    error.__cause__ = requests.exceptions.ConnectionError()
+    harness = _drive_run(monkeypatch, iterations=1, fail_get_setting=error)
     lines = [message for message in harness.logger.messages
              if message.startswith("Error occurred, sleep 10s:")]
     assert lines, harness.logger.messages
-    assert lines[0] == "Error occurred, sleep 10s: ConnectionError", lines
+    assert lines[0].startswith("Error occurred, sleep 10s: GristError"), lines
 
 
 def test_a_wallet_error_reaches_grist_with_the_proxy_credentials_stripped(monkeypatch):

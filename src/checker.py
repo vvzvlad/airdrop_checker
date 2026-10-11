@@ -17,6 +17,7 @@ import traceback
 from datetime import datetime
 
 import colorama  # type: ignore
+from grist_client import GristClient
 
 from src.balances import (
     check_balance,
@@ -25,15 +26,13 @@ from src.balances import (
     generate_proxy,
     redact_credentials,
 )
-from src.grist import GRIST
 from src.heartbeat import write_heartbeat
-from src.http_timeout import install_default_timeout
 from src.settings import settings
 
 # Naming the logger is not a side effect — getLogger() only registers a name, and
 # `_write_heartbeat` below needs the object. Everything that CHANGES process-wide
-# state (the handler, colorama's stdout wrapper, the requests patch) happens in
-# _configure_process(), called from run().
+# state (the handler, colorama's stdout wrapper) happens in _configure_process(),
+# called from run().
 logger = logging.getLogger("airdrop_checker")
 
 # The tables of the Grist document this service works against. Not configurable:
@@ -60,20 +59,13 @@ HEARTBEAT_SLEEP_CHUNK = 30  # seconds
 def _configure_process():
     """Process-wide setup, done once when the loop starts — never at import.
 
-    All three of these reach outside this module: colorama replaces `sys.stdout`
-    with a wrapper, the handler makes this logger write to stderr, and the
-    timeout patch rewrites `requests.Session.request` for everything in the
-    process. Doing them at import time means merely IMPORTING `src.checker` —
-    which the test suite and `ci/smoke.py` both do, without any intention of
-    running the loop — silently reshapes stdout and the HTTP library for whoever
-    imported it. A program's side effects belong to running it.
+    Both of these reach outside this module: colorama replaces `sys.stdout` with
+    a wrapper, and the handler makes this logger write to stderr. Doing them at
+    import time means merely IMPORTING `src.checker` — which the test suite and
+    `ci/smoke.py` both do, without any intention of running the loop — silently
+    reshapes stdout for whoever imported it. A program's side effects belong to
+    running it.
     """
-    # FIRST in this function, which run() calls before it builds the Grist client:
-    # grist_api issues its requests without a timeout, so a stalled Grist
-    # connection hangs this process forever. A patch installed after the first
-    # fetch protects every call except the one that is already hanging.
-    install_default_timeout()
-
     colorama.init(autoreset=True)
 
     logger.setLevel(logging.INFO)
@@ -111,8 +103,7 @@ def run():
 
     _configure_process()
 
-    grist = GRIST(settings.grist_server, settings.grist_doc_id, settings.grist_api_key,
-                  NODES_TABLE, SETTINGS_TABLE, logger)
+    grist = GristClient(settings.grist_server, settings.grist_doc_id, settings.grist_api_key)
 
     # The first mark, written BEFORE the first Grist call. It says "the process
     # started and its configuration parsed", which is precisely what the deploy
@@ -125,20 +116,20 @@ def run():
     while True:
         _write_heartbeat()                     # liveness mark each iteration
         try:
-            proxy_string = grist.find_settings("Proxy")
+            proxy_string = grist.get_setting(SETTINGS_TABLE, "Proxy")
             random.seed(datetime.now().timestamp())
             # `Walled count` is a typo in the Grist document's own Setting column.
             # It is spelled that way HERE because it is spelled that way THERE —
-            # the document belongs to someone else, and find_settings raises on a
+            # the document belongs to someone else, and get_setting raises on a
             # name it cannot find, so "fixing" this string stops the service.
-            wallet_count_max = int(grist.find_settings("Walled count max"))
-            wallet_count_min = int(grist.find_settings("Walled count min"))
-            wait_time_max = int(grist.find_settings("Wait time max"))
-            wait_time_min = int(grist.find_settings("Wait time min"))
+            wallet_count_max = int(grist.get_setting(SETTINGS_TABLE, "Walled count max"))
+            wallet_count_min = int(grist.get_setting(SETTINGS_TABLE, "Walled count min"))
+            wait_time_max = int(grist.get_setting(SETTINGS_TABLE, "Wait time max"))
+            wait_time_min = int(grist.get_setting(SETTINGS_TABLE, "Wait time min"))
             logger.info(f"wallet_count_max: {wallet_count_max}, wallet_count_min: {wallet_count_min}, wait_time_max: {wait_time_max}, wait_time_min: {wait_time_min}")
             wallets_count = random.randint(wallet_count_min, wallet_count_max)
-            wallets = find_none_values(grist, do_random=True, count=wallets_count)
-            # Every line above this one is network: five find_settings calls, each
+            wallets = find_none_values(grist, NODES_TABLE, do_random=True, count=wallets_count)
+            # Every line above this one is network: five get_setting calls, each
             # fetching the Settings table over HTTP, and then the Wallets fetch
             # inside find_none_values. On a slow Grist the mark at the top of the
             # iteration is already old by the time execution reaches here, so the
@@ -170,7 +161,7 @@ def run():
                         # password in `docker logs` on every single round.
                         logger.info(f"Check wallet {wallet.Address} with proxy {redact_credentials(proxy)}...")
                         hypercore_hype_value, hyperevm_hype_value = check_balance(wallet.Address, logger, proxy)
-                        grist.update(wallet.id, {"hypercore_hype_value": hypercore_hype_value, "hyperevm_hype_value": hyperevm_hype_value})
+                        grist.update(NODES_TABLE, wallet.id, {"hypercore_hype_value": hypercore_hype_value, "hyperevm_hype_value": hyperevm_hype_value})
                     except Exception as e:
                         # Redacted on the way out in both directions: this text is
                         # logged AND written into the wallet's Grist row below, and
@@ -199,7 +190,7 @@ def run():
                         # exist is a property of a document this repository does
                         # not own, so changing the names is the owner's call, not
                         # a refactor's.
-                        grist.update(wallet.id, {"Value": "--", "Comment": f"Error: {reason}"})
+                        grist.update(NODES_TABLE, wallet.id, {"Value": "--", "Comment": f"Error: {reason}"})
             except Exception as e:
                 # The traceback goes through the redaction too, not just the
                 # message, and it stays that way now that `check_balance` re-raises
@@ -220,7 +211,8 @@ def run():
             sleep_with_heartbeat(time_to_sleep)
         except Exception as e:
             # The outermost net, and the one that catches the settings fetches: those
-            # go out through `requests`, so a broken HTTP(S)_PROXY in the stack's
-            # environment arrives here as a ProxyError quoting the whole proxy URL.
+            # go out through `requests` inside grist_client, so a broken HTTP(S)_PROXY
+            # in the stack's environment arrives here as a GristError quoting the
+            # ProxyError, the whole proxy URL included.
             logger.error(f"Error occurred, sleep 10s: {describe_error(e)}")
             sleep_with_heartbeat(10)

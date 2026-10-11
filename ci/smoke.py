@@ -47,9 +47,7 @@ covers what only an assembled image can answer:
   `src/settings.py` declares `env_file=".env"`, so one that got in would also be READ;
 * the program FAILS LOUDLY on missing configuration: `python main.py` with the three
   required variables stripped must exit non-zero, name each of them, and print no
-  traceback. That is the specific defect this repository was fixed for — the old code
-  passed `None` straight into GristDocAPI — and the old `while true` CMD is exactly what
-  used to hide it;
+  traceback;
 * healthcheck.py, the probe docker runs and auto-heal acts on, returns the DOCUMENTED
   verdict in each of its three states: heartbeat file absent, fresh, stale. It is driven
   through HEARTBEAT_FILE and HEARTBEAT_MAX_AGE against a scratch file of this script's own
@@ -119,11 +117,9 @@ SHIPPED_FILES = (
     "src/settings.py",
     "src/config_errors.py",
     "src/checker.py",
-    "src/grist.py",
     "src/balances.py",
     "src/heartbeat.py",
     "src/healthcheck.py",
-    "src/http_timeout.py",
 )
 
 # The importable form of the same set. `main` is included on purpose: it is the module the
@@ -135,10 +131,8 @@ FIRST_PARTY_MODULES = (
     "src.settings",
     "src.config_errors",
     "src.checker",
-    "src.grist",
     "src.balances",
     "src.heartbeat",
-    "src.http_timeout",
 )
 
 # Top-level names that are this project's own packages/modules rather than distributions
@@ -169,7 +163,7 @@ IGNORED_SRC_DIRS = ("__pycache__",)
 # `pydantic` is separate from `pydantic_settings` because src/config_errors.py imports it
 # directly — a requirements file that pinned only the latter would still resolve today and
 # break the day pydantic-settings stops depending on it.
-EXPECTED_THIRD_PARTY = ("colorama", "grist_api", "pydantic", "pydantic_settings", "requests")
+EXPECTED_THIRD_PARTY = ("colorama", "grist_client", "pydantic", "pydantic_settings", "requests")
 
 # The module the Dockerfile's HEALTHCHECK runs, in the form it runs it: `python -m`. `-m`
 # is what makes that work from WORKDIR /app — running the file by path would put src/ on
@@ -392,7 +386,7 @@ def declared_third_party_imports(sources):
     """Top-level names the shipped files import that are neither stdlib nor our own.
 
     `sources` maps a path from SHIPPED_FILES to its text. The union across ALL of them is
-    what matters: src/checker.py imports src/grist.py at startup, so a requirement only the
+    what matters: src/checker.py imports src/balances.py at startup, so a requirement only the
     latter needs is just as fatal as one the entry script needs directly.
 
     Derived from the files' own syntax trees rather than from requirements.txt: the code is

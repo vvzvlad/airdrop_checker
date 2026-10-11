@@ -1,8 +1,7 @@
 certifi==2024.8.30
 charset-normalizer==3.3.2
 colorama==0.4.6
-future==1.0.0
-grist-api==0.1.0
+grist-client @ https://gitea.vvzvlad.xyz/api/packages/projects/pypi/files/grist-client/0.1.0/grist_client-0.1.0-py3-none-any.whl
 idna==3.9
 # Without this, a `socks5://` or `socks5h://` proxy string typed into the Grist
 # `Proxy` setting fails every request with "Missing dependencies for SOCKS
