@@ -3,25 +3,17 @@
 # documents what that service looks like on its own, and is what you would use to run
 # the image standalone. Values below are PLACEHOLDERS (XXX), not real secrets.
 #
-# No inbound port, no Traefik: the checker only makes outbound calls, so there are no
-# `networks` and no HTTP healthcheck here. Liveness comes from the image's own
-# HEALTHCHECK (`python -m src.healthcheck` over the heartbeat file), which is what
-# auto-heal acts on.
-#
-# No volume either: the service keeps no state of its own. The wallets and the loop's
-# own parameters live in the Grist document, and the heartbeat lives in /tmp by
-# contract — so there is nothing under /app/data to persist.
+# No inbound port, networks or volume: the checker only makes outbound calls and keeps
+# no state (wallets and loop parameters live in Grist, the heartbeat in /tmp). Liveness
+# comes from the image's HEALTHCHECK, which auto-heal acts on.
 
 services:
   airdrop_checker:
     image: gitea.vvzvlad.xyz/projects/airdrop_checker:latest
-    # NOTE: production runs this container as `airdropchecker`, without the underscore,
-    # so that is the name kept here. It predates the one-name-everywhere convention and
-    # renaming it is a production change, not a repository one.
+    # Production's container name, without the underscore; renaming it is a production
+    # change.
     container_name: airdropchecker
-    # `unless-stopped`, and it is load-bearing since the image stopped wrapping the
-    # script in a `while true` loop: a container whose configuration is broken now dies
-    # visibly, and this is what restarts it.
+    # Load-bearing: a container with broken configuration exits, and this restarts it.
     restart: unless-stopped
     # The app runs as non-root `app` (uid 1000): the entrypoint starts as root, chowns
     # /app/data and drops privileges via gosu. A `user:` override here makes the
@@ -43,8 +35,7 @@ services:
         max-file: 5
         max-size: 10m
     labels:
-      # The canonical pair, and what production actually carries. Auto-update pulls a
-      # new :latest; auto-heal restarts the container when the image's HEALTHCHECK
-      # reports unhealthy — i.e. when the main loop stopped writing its heartbeat.
+      # What production carries. Auto-update pulls a new :latest; auto-heal restarts the
+      # container when the HEALTHCHECK reports a stale heartbeat.
       io.portainer.update.enable: "true"
       io.portainer.autoheal.enable: "true"

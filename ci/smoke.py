@@ -1,91 +1,44 @@
 """Smoke test for the airdrop_checker image, run against a live container.
 
-It is fed to the container over stdin (`docker exec -i <name> python -u - < ci/smoke.py`),
-so it never has to be copied into the image, and it can be run by hand the same way
-against any locally started container of this image. Nothing here publishes a port or
-talks to 127.0.0.1: the CI job lives inside act_runner's own container while docker runs
-on the host, so anything that has to be seen from inside the image is seen from inside it.
+Fed over stdin (`docker exec -i <name> python -u - < ci/smoke.py`), so it is not copied
+into the image and can be run by hand the same way against a local container. Nothing
+publishes a port or talks to 127.0.0.1: the CI job runs inside act_runner's container
+while docker runs on the host. Pure stdlib; the only other imports are the ones it gates.
 
-It is pure stdlib on purpose: the only imports it ever performs beyond that are the ones
-it is GATING, one at a time and by name. Anything else imported up here would be a library
-that fails at the gate instead of at the thing being gated.
+The pytest suite (run before this) covers the logic; this covers what only an assembled
+image can answer:
 
-What this gate is, and what it is not
--------------------------------------
-The repository has a pytest suite now, and CI runs it BEFORE this — `build` depends on
-`test`, so nothing red gets as far as an image. That suite covers the logic. This file
-covers what only an assembled image can answer:
+* every shipped python file compiles under the image's python:3.9;
+* every third-party module those files import resolves, one module per row;
+* every first-party module imports (catches a missing COPY or `__init__.py`);
+* PID 1 is `python main.py` — the ENTRYPOINT -> gosu -> CMD chain end to end;
+* PID 1 runs as uid 1000, read from /proc/1/status (`docker exec id -u` bypasses the
+  ENTRYPOINT and would report root on a healthy container);
+* the loop writes its heartbeat and keeps moving it (two samples: one sample cannot tell
+  a turning loop from one that wrote once and wedged);
+* /app/src holds exactly the declared modules (`COPY src/ src/` ships the directory, the
+  lists below are hand-written);
+* .dockerignore kept tests/, ci/, .env and .venv out (src/settings.py would read a
+  shipped .env);
+* `python main.py` without the three required variables exits non-zero, names each of
+  them and prints no traceback;
+* healthcheck.py gives the documented verdict for an absent, fresh and stale heartbeat,
+  driven through HEARTBEAT_FILE/HEARTBEAT_MAX_AGE against a scratch file;
+* the probe really drops to the unprivileged user (it must fail to read a fresh heartbeat
+  in a root-only directory).
 
-* every python file the image ships COMPILES under the image's own interpreter. The base
-  is `python:3.9`, which is already end-of-life — so this is the line that goes red the day
-  the code stops parsing on the version production actually runs;
-* every third-party module those files import RESOLVES inside the image, reported one
-  module at a time, so a dropped requirement names itself instead of arriving as a stack
-  trace out of a program that got half-way through its first Grist call;
-* every FIRST-PARTY module imports inside the image. `py_compile` cannot see a package
-  that was not COPYed, an `__init__.py` that was left behind or an import that only
-  resolves from the repository root — importing can, and after a layout refactor that is
-  exactly the breakage worth fearing;
-* PID 1 really is `python main.py` — the whole ENTRYPOINT → gosu → CMD chain, end to end.
-  Since the CMD stopped being a `while true` wrapper this is also the liveness statement:
-  a container that is up IS the checker, not a shell that outlives it;
-* PID 1 runs as uid 1000, i.e. the entrypoint actually dropped privileges. Read from
-  /proc/1/status and NOT from `docker exec ... id -u`: exec does not go through the image's
-  ENTRYPOINT, so it reports the image's default user and would answer 0 on a perfectly
-  healthy container — a check that cannot fail is not a check;
-* the loop is WRITING its heartbeat AND STILL MOVING IT. The probe below is only worth as
-  much as the file it reads, and the writer lives on the other side of the settings object.
-  Two samples, not one: a single reading can only say how old the mark is, and right after
-  startup that is "seconds" whatever the loop does next — so a process that wrote its mark
-  once and wedged passes a one-sample check by construction;
-* /app/src holds exactly the modules this file declares. The image gets its code through
-  `COPY src/ src/`, which ships whatever is in the directory, while the lists below are
-  written by hand — so without this a module added to src/ would be compiled and imported
-  by nobody, and the gate would report a clean image it had never looked at in full;
-* .dockerignore actually kept the development tree out of the image: tests/, ci/, .env and
-  .venv. A `.env` shipped inside an image is a credential in a registry, and
-  `src/settings.py` declares `env_file=".env"`, so one that got in would also be READ;
-* the program FAILS LOUDLY on missing configuration: `python main.py` with the three
-  required variables stripped must exit non-zero, name each of them, and print no
-  traceback;
-* healthcheck.py, the probe docker runs and auto-heal acts on, returns the DOCUMENTED
-  verdict in each of its three states: heartbeat file absent, fresh, stale. It is driven
-  through HEARTBEAT_FILE and HEARTBEAT_MAX_AGE against a scratch file of this script's own
-  making, so it can never be confused with the real heartbeat, and it needs nothing but a
-  file's mtime — no credential, no network, no waiting for anything. The scratch file and
-  its directory are given explicit modes, because the probe reads them AFTER dropping to
-  uid 1000 while this script creates them as root (see make_probe_scratch_dir);
-* that same probe really BECOMES the unprivileged user. Docker starts a HEALTHCHECK
-  outside the ENTRYPOINT, so the probe drops privileges itself and nothing else in the
-  pipeline sees whether it managed to: the unit tests replace the privilege primitives and
-  can only pin the shape of the calls. Here it is asked to read a fresh heartbeat inside a
-  root-only directory and must fail to — which only a process that stopped being root can
-  do.
+Docker's own health verdict is not visible from inside; the workflow waits for it before
+running this script. The container runs with placeholder configuration (see the
+workflow), so no credential is used and neither Grist nor purrfolio.com is contacted.
 
-What this file deliberately does NOT check is docker's own health verdict: that is not
-visible from inside the container. The workflow waits for it before running this script,
-and treats an EMPTY health status as its own failure — an image whose Dockerfile lost its
-HEALTHCHECK line reports no health at all, which would otherwise read as "nothing to
-complain about" while auto-heal was left with nothing to act on.
+Three properties are easy to lose:
 
-The container this runs in is started with PLACEHOLDER configuration (see the workflow):
-a Grist server pointed at 127.0.0.1:9, the discard port, so the loop's fetch fails
-instantly and locally. No credential is involved and no external API — neither Grist nor
-purrfolio.com — is contacted by any of it. That is deliberate on both counts: a gate that
-reddens when somebody else's service has an outage is a gate everybody learns to ignore,
-and a gate that needs real keys cannot run on a pull request at all.
-
-Three properties matter and are easy to lose:
-
-* Failures leave through SystemExit, never `assert`. Asserts vanish under PYTHONOPTIMIZE=1
-  (a common image tweak), which would silently turn this gate permanently green.
-* Every target is checked before anything is reported, so one run shows the full extent of
-  the breakage rather than only the first broken thing. A check that CANNOT run — a file is
-  unreadable, the scratch directory cannot be created — reports itself as FAILED; it is
-  never quietly skipped, which is the classic way a gate keeps reporting success while
-  proving less and less.
-* The gate COUNTS its own verdicts against EXPECTED_TARGETS below. A probe that quietly
-  stops probing is the one failure no other check in the pipeline can catch.
+* Failures leave through SystemExit, never `assert` (asserts vanish under
+  PYTHONOPTIMIZE=1).
+* Every target is checked before anything is reported, and a check that cannot run
+  reports itself as FAILED rather than being skipped.
+* The gate counts its own verdicts against EXPECTED_TARGETS, so a probe that quietly
+  stops probing fails the run.
 """
 
 import ast
@@ -100,10 +53,7 @@ import tempfile
 import time
 import traceback
 
-# WORKDIR in the Dockerfile, and the only place this script looks. Hardcoded rather than
-# read back from the container's own working directory on purpose: /app is part of the
-# contract between this repo and its image, so a Dockerfile that quietly moves WORKDIR
-# somewhere else has to go red here and be looked at, not be politely followed.
+# WORKDIR in the Dockerfile. Hardcoded so that moving WORKDIR fails the gate.
 APP_DIR = "/app"
 
 # Every python file the image is expected to ship, as a path relative to /app. Listed
@@ -140,29 +90,19 @@ FIRST_PARTY_MODULES = (
 # same edit that gets it compiled above.
 FIRST_PARTY_ROOTS = set(path.split("/")[0].replace(".py", "") for path in SHIPPED_FILES)
 
-# The package directory the image receives wholesale (`COPY src/ src/`) and the declared
-# contents of it, as paths relative to that directory. The inventory check compares the two
-# in BOTH directions, which is what keeps the hand-written tuple above honest: the image is
-# built from a directory, not from that tuple, so a module that appears in src/ arrives in
-# /app/src whether or not anybody remembered to list it — and an unlisted module is one this
-# gate never compiles and never imports.
+# The package directory the image receives wholesale (`COPY src/ src/`) and its declared
+# contents, relative to it. The inventory check compares the two in both directions, so an
+# unlisted module in src/ cannot escape compilation and import here.
 SRC_PACKAGE = "src"
 DECLARED_SRC_MODULES = tuple(
     path.split("/", 1)[1] for path in SHIPPED_FILES if path.startswith(SRC_PACKAGE + "/"))
-# Directories inside /app/src that are not source. __pycache__ is written by the container's
-# own interpreter (the loop imports these modules on every start), so it is present on a
-# perfectly healthy image and must not be read as an undeclared module.
+# Directories inside /app/src that are not source; __pycache__ is written by the running loop.
 IGNORED_SRC_DIRS = ("__pycache__",)
 
-# The third-party top-level modules the shipped files are expected to import, DECLARED
-# rather than only discovered. The extraction below reads the real import statements and
-# is compared against this tuple, which buys two things a bare discovery cannot: the
-# per-module row count is a property of this file (so the self-check at the bottom has
-# something stable to count against), and a dependency that appears in the code without
-# appearing in requirements.txt is named here as a difference rather than as a traceback.
-# `pydantic` is separate from `pydantic_settings` because src/config_errors.py imports it
-# directly — a requirements file that pinned only the latter would still resolve today and
-# break the day pydantic-settings stops depending on it.
+# The third-party top-level modules the shipped files are expected to import. Declared, and
+# compared against the real import statements, so the row count is stable for the self-check
+# and a new dependency shows up as a difference. `pydantic` is listed separately because
+# src/config_errors.py imports it directly.
 EXPECTED_THIRD_PARTY = ("colorama", "grist_client", "pydantic", "pydantic_settings", "requests")
 
 # The module the Dockerfile's HEALTHCHECK runs, in the form it runs it: `python -m`. `-m`
@@ -203,23 +143,15 @@ HEARTBEAT_WAIT_PAUSE = 0.5
 # How fresh the live heartbeat has to be to count as "being written". Generous next to the
 # loop's own cadence; the point is only that it is not a corpse left from startup.
 LIVE_HEARTBEAT_MAX_AGE = 120
-# How long the mark is watched for MOVEMENT after the first reading. In this container every
-# Grist fetch fails instantly (the server is pointed at the discard port), so the loop takes
-# the error branch and sleeps ten seconds through sleep_with_heartbeat — which re-marks after
-# every chunk. Forty seconds is therefore several marks' worth of margin on a slow runner,
-# while still being far below the point where waiting would be indistinguishable from hanging.
+# How long the mark is watched for movement after the first reading. In this container every
+# Grist fetch fails fast (`grist.invalid` does not resolve), so the loop sleeps ten seconds
+# through sleep_with_heartbeat, which re-marks after every chunk; 40 s leaves several marks of
+# margin on a slow runner.
 HEARTBEAT_ADVANCE_TIMEOUT = 40
 
-# The window healthcheck.py is driven with. It is passed EXPLICITLY through
-# HEARTBEAT_MAX_AGE rather than left to the probe's own 1200 s default, so the three states
-# below stay decidable no matter what that default becomes — and so this file says out loud
-# what "fresh" and "stale" mean here instead of borrowing a number from another file.
-#
-# It MUST differ from that 1200 s default, and this is not cosmetic. With the two equal, a
-# probe that ignored HEARTBEAT_MAX_AGE entirely and hardcoded 1200 would answer all three
-# states exactly as a correct one does, and pass — the very check that is supposed to prove
-# the variable is honoured would prove nothing. With a window this much smaller, such a
-# probe calls the backdated file fresh and the stale row goes red.
+# The window healthcheck.py is driven with, passed explicitly through HEARTBEAT_MAX_AGE. It
+# must differ from the probe's 1200 s default: otherwise a probe that ignored the variable
+# would pass all three states.
 HEARTBEAT_MAX_AGE = 60
 # How far the heartbeat is backdated for the stale case. Three times the window, so the
 # verdict cannot hinge on a second of clock skew or on how long the probe took to start.
@@ -228,10 +160,8 @@ HEARTBEAT_STALE_AGE = 3 * HEARTBEAT_MAX_AGE
 # anything approaching this means the interpreter itself is wedged. Three runs at this
 # bound is 90 s worst case, which sits inside the smoke step's budget.
 HEARTBEAT_PROBE_TIMEOUT = 30
-# Name of the scratch heartbeat inside a fresh mkdtemp() directory. It is deliberately NOT
-# the live path above: pointing the probe at that would let a heartbeat written by the
-# container's own main loop decide the verdict, and the test would then be measuring the
-# application instead of the probe.
+# Name of the scratch heartbeat inside a fresh mkdtemp() directory; not the live path, so
+# the running loop's mark cannot decide the probe's verdict.
 HEARTBEAT_NAME = "smoke-heartbeat"
 
 # Bound on the fail-loudly run. It exits while importing src.settings, so this only has to
@@ -243,33 +173,15 @@ EXCERPT_CHARS = 400
 
 # "The image is broken, do not ship it."
 EXIT_CHECKS_FAILED = 1
-# "THIS SCRIPT is broken": it returned a different number of verdicts than it declares, or
-# it crashed. Deliberately a separate code from the one above — sending somebody to inspect
-# an image when the fault is in the gate sends them to the wrong artefact entirely.
+# "This script is broken": it returned a different number of verdicts than it declares, or
+# it crashed. A separate code so the fault is not blamed on the image.
 EXIT_SELF_CHECK = 3
 
-# How many verdicts each probe group below is REQUIRED to return, compared against what it
-# actually returned before anything is reported. Every group returns exactly one row per
-# target on every path it can take — including the paths where a check could not run at
-# all, which report their targets as FAILED rather than returning nothing. So these numbers
-# are a property of the SOURCE, not of a particular run, and any run that disagrees with
-# them is a run in which a check went missing.
-#
-# What this defends against is this gate's own worst failure mode, and it is the one thing
-# no other check in the pipeline can catch: a probe that quietly stops probing. A check
-# dropped in a refactor, a new early-return path that forgets to emit its rows, an
-# `if ...: return []` left behind after debugging — none of those print a thing, none of
-# them contribute a failure, and the run would still end on `smoke ok: N/N targets`,
-# because N counted from the rows that happened to arrive agrees with itself no matter how
-# few there are. The image then goes to the registry with the gate reporting green about
-# checks it is no longer performing.
-#
-# THE ONE WAY TO MISUSE THIS: when a mismatch fires, do NOT edit the number to match what
-# the run produced. The number is the claim; the run is the evidence that the claim has
-# become false. "Fixing" it that way converts the tripwire into a rubber stamp forever.
-#
-# The counts are derived from the source wherever a derivation exists, so they cannot go
-# stale when one of those tuples grows.
+# How many verdicts each probe group is required to return, checked before anything is
+# reported. Every group returns one row per target on every path, including FAILED rows for
+# checks that could not run, so a mismatch means a check went missing (a dropped check, an
+# early return that emits nothing). When it fires, fix the probe, not the number. Counts
+# are derived from the source tuples where possible.
 EXPECTED_TARGETS = (
     ("(a) shipped files are readable", len(SHIPPED_FILES)),
     ("(b) shipped files compile", len(SHIPPED_FILES)),
@@ -277,16 +189,13 @@ EXPECTED_TARGETS = (
     ("(d) first-party imports", len(FIRST_PARTY_MODULES)),
     ("(e) PID 1 is the checker", 1),
     ("(f) PID 1 dropped privileges", 1),
-    # Two, and the second one is new rather than a split of the first: the mark existing and
-    # being fresh is one fact, the mark still MOVING is another, and only the second can tell
-    # a turning loop from one that wrote its mark at startup and hung.
+    # Fresh, and still moving: only the second tells a turning loop from a hung one.
     ("(g) the loop writes its heartbeat and keeps moving it", 2),
     ("(h) .dockerignore kept the dev tree out", len(EXCLUDED_PATHS)),
     ("(i) missing configuration is fatal and loud", 1),
     ("(j) the healthcheck probe's three states", 3),
     ("(k) /app/src holds exactly the declared modules", 1),
-    # One, and it is the only check anywhere that can SEE the probe's privilege drop
-    # happen: the tests can only pin the shape of the calls (see probe_privileges_rows).
+    # The only check that observes the probe's privilege drop (see probe_privileges_rows).
     ("(l) the probe reads the heartbeat unprivileged", 1),
 )
 
@@ -351,16 +260,11 @@ def compile_check(relative):
 
 def stdlib_names():
     """Every module name that belongs to THIS interpreter's standard library."""
-    # Three sources, because none of them is sufficient on its own here:
-    #   * sys.builtin_module_names covers what is compiled into the interpreter (`sys`,
-    #     `time`, ...), which never appears as a file anywhere;
-    #   * sys.stdlib_module_names is the authoritative list — and it only exists from
-    #     Python 3.10. This image is python:3.9, so it is absent exactly where it would be
-    #     most convenient, and `getattr` is what keeps this script working on both;
-    #   * listing the stdlib directory is therefore the fallback that carries 3.9: every
-    #     stdlib module is a file or a package directory in there, and the C extensions
-    #     live one level down in lib-dynload. Third-party packages are NOT in there — pip
-    #     installs into site-packages, which shows up as a single harmless entry.
+    # Three sources, none sufficient alone:
+    #   * sys.builtin_module_names: modules compiled into the interpreter;
+    #   * sys.stdlib_module_names: authoritative, but only from Python 3.10 (the image is 3.9);
+    #   * the stdlib directory and its lib-dynload: carries 3.9. pip installs into
+    #     site-packages, which shows up as a single harmless entry.
     names = set(sys.builtin_module_names)
     names |= set(getattr(sys, "stdlib_module_names", ()))
     stdlib_dir = sysconfig.get_paths().get("stdlib")
@@ -418,18 +322,11 @@ def import_reason(module):
     try:
         importlib.import_module(module)
     except BaseException as error:
-        # Deliberately broad: a missing distribution raises ImportError, but a wheel built
-        # for another platform, a broken C extension or a package whose own import-time
-        # code blows up raise something else entirely, and all of them mean the same thing
-        # here — this program will not start in this image.
-        #
-        # BaseException rather than Exception, and that is not pedantry: src/settings.py
-        # calls sys.exit(1) when configuration is missing, and importing `main` reaches it.
-        # SystemExit does NOT descend from Exception, so a plain `except Exception` would
-        # let it escape and kill this script mid-run — printing not one ok/FAIL line, in
-        # exactly the run where the log is the only diagnosis available. Worse, a module
-        # that exited 0 at import time would take this script down with status 0 and the
-        # step would pass having proved nothing at all.
+        # Broad on purpose: a wrong-platform wheel or failing import-time code means the
+        # program will not start, just like an ImportError. BaseException because
+        # src/settings.py calls sys.exit(1) on missing configuration and importing `main`
+        # reaches it; a SystemExit escaping here would end the script without a report
+        # (and with status 0 if the module exited 0).
         return "{}: {}".format(type(error).__name__, error)
     return None
 
@@ -526,10 +423,8 @@ def pid1_rows():
     if not argv:
         return [(target, "{} is empty".format(path))]
     cmdline = " ".join(argv)
-    # argv[0] must be an interpreter. Since the CMD stopped being a `while true` shell
-    # wrapper, PID 1 is the interpreter itself — a shell here means the wrapper came back
-    # (and with it the failure-hiding restart loop it was removed for), or that an
-    # --entrypoint was passed.
+    # argv[0] must be an interpreter: a shell here means a restart-loop wrapper in the CMD
+    # or an overridden entrypoint.
     if "python" not in os.path.basename(argv[0]):
         return [(target, (
             "PID 1 is {!r}, whose argv[0] is not a python interpreter — the CMD was "
@@ -542,11 +437,8 @@ def pid1_rows():
 def privileges_rows():
     """(f) The entrypoint must have handed the process to the unprivileged app user.
 
-    Read from /proc/1/status rather than from `docker exec ... id -u`: exec does NOT go
-    through the image's ENTRYPOINT, so it reports the image's default user (root, since
-    there is no USER directive) and would answer 0 on a container whose gosu chain works
-    perfectly. That check cannot fail and therefore proves nothing; this one looks at the
-    process the entrypoint actually produced.
+    Read from /proc/1/status rather than `docker exec ... id -u`: exec bypasses the
+    ENTRYPOINT and would report root (no USER directive) on a healthy container.
     """
     target = "PID 1 runs as uid {} (the entrypoint dropped root via gosu)".format(APP_UID)
     path = os.path.join(PROC_ROOT, "1", "status")
@@ -576,13 +468,9 @@ def privileges_rows():
 def heartbeat_writer_rows():
     """(g) The heartbeat the probe reads has to be produced by the loop AND keep moving.
 
-    Two rows, always, and the second one is the check that has teeth. A single reading of
-    the mtime can only answer "how old is the mark", and moments after startup the answer is
-    "a few seconds" no matter what happens next — so the very state this is written to catch,
-    a loop that wrote its mark once and then wedged, passes a one-sample check by
-    construction. Only a SECOND reading with a different mtime says the loop is still
-    turning; the first reading's freshness then merely tells apart "never started" from
-    "started and stopped".
+    Two rows, always. Right after startup a single reading is fresh whatever happens next;
+    only a second, different mtime says the loop is still turning. The first reading tells
+    "never started" from "started and stopped".
     """
     exists_target = "the running loop writes {} and it is fresh".format(LIVE_HEARTBEAT_FILE)
     advance_target = (
@@ -644,15 +532,9 @@ def heartbeat_writer_rows():
 def src_inventory_rows():
     """(k) /app/src must hold exactly the modules declared in SHIPPED_FILES.
 
-    The lists at the top of this file are hand-written, but the image is not built from
-    them: `COPY src/ src/` ships the whole directory. So a module added to src/ arrives in
-    the image regardless, and until this check existed it was simply never compiled here,
-    never imported here, and never counted — the gate reported a clean image while looking
-    at less of it with every release.
-
-    Compared in BOTH directions on purpose. A file in the image that is not declared means
-    the gate is under-checking; a declared file the image does not have means either a COPY
-    stopped covering it or this tuple describes a layout that no longer exists.
+    `COPY src/ src/` ships the whole directory while the lists above are hand-written.
+    Compared in both directions: an undeclared file means the gate under-checks; a missing
+    declared file means a COPY or this tuple is out of date.
     """
     target = "/app/{} holds exactly the {} declared *.py modules".format(
         SRC_PACKAGE, len(DECLARED_SRC_MODULES))
@@ -812,34 +694,12 @@ def make_probe_scratch_dir():
 
     Returns (path, None) or (None, reason).
 
-    This is a permissions problem with teeth, and it silently disabled group (j)
-    entirely. This script arrives through `docker exec` with no `--user` and the
-    image has no USER directive, so it runs as ROOT; `mkdtemp` creates its directory
-    0700 and owned by root. The probe it then starts is `python -m src.healthcheck`,
-    which begins as root and IMMEDIATELY drops to uid 1000 — that is its whole
-    design. From there it cannot traverse a 0700 root-owned directory, so
-    `os.path.getmtime` raises PermissionError, which is an OSError, which the probe
-    reports as "heartbeat file missing".
-
-    The consequence is not that one row went red: it is that all three rows in group
-    (j) stopped meaning anything. "Absent" and "stale" still exited non-zero, but for
-    the wrong reason — a permission error is not a verdict about staleness — while
-    "fresh" MUST exit 0 and could not, so the gate failed and no image was ever
-    pushed. Production was never affected: /tmp is 1777 there and the heartbeat is
-    written by `app` itself.
-
-    So the modes are set EXPLICITLY rather than left to whatever umask the container
-    was started with: the directory 0755 so the dropped probe can traverse it, the
-    file 0644 so it can read it (see write_probe_heartbeat). That reproduces the
-    production shape — a mark the service's own uid can read — which is the only
-    shape in which group (j) grades the probe rather than the filesystem.
-
-    Of the two modes it is the DIRECTORY's that decides the verdict: the probe only
-    stats the file (`os.path.getmtime`), and stat needs the traversal bit on the path
-    but no permission on the file itself. The file mode is set anyway, because the
-    scratch mark should have the shape the production one has and because a probe that
-    grows to read the file's CONTENT must not turn this into a puzzle. Group (l) below
-    is built on exactly that asymmetry, from the other side.
+    This script runs as root and `mkdtemp` creates a 0700 root-owned directory, but the
+    probe drops to uid 1000 at once and could not traverse it, reporting "missing" for
+    every state. The directory is therefore 0755 and the file 0644 (see
+    write_probe_heartbeat), the shape of the production mark. The directory mode is what
+    decides the verdict (stat needs only traversal); group (l) uses that asymmetry from
+    the other side.
     """
     try:
         workdir = tempfile.mkdtemp(prefix="smoke-heartbeat-")
@@ -928,27 +788,11 @@ def heartbeat_probe_rows():
 def probe_privileges_rows():
     """(l) The probe must really BECOME the app user, not merely intend to.
 
-    Group (f) grades PID 1, which is the entrypoint's gosu drop. The probe is a
-    different process on a different path: docker starts a HEALTHCHECK outside the
-    ENTRYPOINT, so it begins as root and drops privileges itself, in
-    `src/healthcheck.py`. Nothing else in this pipeline can observe whether it did.
-    The unit tests certainly cannot: they replace the module's privilege primitives —
-    `_geteuid` among them, so the root branch runs on a suite that is not root — and
-    assert the SHAPE of the recorded calls. No test performs a real uid switch: empty
-    the body of `_setuid` in the probe and every one of those tests still passes.
-
-    The oracle is the permission asymmetry described in make_probe_scratch_dir, used
-    from the other side: a FRESH heartbeat inside a 0700 root-owned directory. Root
-    can traverse it and grade the mark fresh (exit 0); uid 1000 cannot traverse it at
-    all, so `getmtime` raises PermissionError and the probe answers non-zero. Since
-    this script runs as root, a non-zero answer is only possible from a process that
-    is no longer root — which is the claim under test, and the one thing about the
-    drop that cannot be faked by intent.
-
-    Note what this deliberately does NOT do: it does not care WHICH unprivileged uid
-    the probe reached, only that it stopped being root. The uid itself is group (f)'s
-    business and the image's, and asking for more here would mean giving this script
-    a way to read another process's credentials, which it has no business having.
+    Group (f) grades PID 1. Docker starts a HEALTHCHECK outside the ENTRYPOINT, so the
+    probe drops privileges itself in `src/healthcheck.py`, and the unit tests only pin the
+    shape of the calls. The oracle: a fresh heartbeat inside a 0700 root-owned directory.
+    Root would grade it fresh (exit 0); a process that stopped being root cannot traverse
+    it and answers non-zero. Which unprivileged uid it reached is not checked here.
     """
     target = ("{} does its reading unprivileged — it cannot see a heartbeat only root "
               "can reach".format(HEALTHCHECK_MODULE))
@@ -1136,17 +980,10 @@ def main():
 
 
 if __name__ == "__main__":
-    # Every verdict this gate reaches leaves through SystemExit, and every one of those exit
-    # codes still means exactly what it says above: `except Exception` does not catch
-    # SystemExit, so 0, 1 and the self-check's 3 all pass through here untouched. What is
-    # caught is the OTHER way this script can end — an exception nobody planned for, which
-    # CPython would exit 1 for: the code this gate reserves for "the image is broken, do not
-    # ship it". That is a lie about which artefact is at fault, and an expensive one.
-    #
-    # The traceback is NOT swallowed: it is the only diagnostic there is for a failure nobody
-    # anticipated. stdout is block-buffered when it is a pipe — which it is under
-    # `docker exec` in CI — so it is flushed first, otherwise every row printed by main()
-    # would land in the log AFTER the traceback and read as if it came from somewhere else.
+    # Verdicts leave through SystemExit, which `except Exception` does not catch. An
+    # unplanned exception would otherwise exit 1, the "image is broken" code, so it is
+    # mapped to the self-check code instead. stdout is flushed first so main()'s rows
+    # (block-buffered under `docker exec`) precede the traceback.
     try:
         main()
     except Exception:

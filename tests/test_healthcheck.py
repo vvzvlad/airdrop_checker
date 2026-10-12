@@ -1,13 +1,8 @@
 """The Docker HEALTHCHECK probe, driven exactly the way docker drives it.
 
-The probe is what auto-heal restarts the production container on, so these run the
-real `python -m src.healthcheck` in a subprocess and look at its EXIT STATUS — not
-at an imported function, which would not prove the module is runnable that way at
-all.
-
-The window is passed explicitly and is deliberately NOT the probe's own 1200 s
-default: with the two equal, a probe that ignored HEARTBEAT_MAX_AGE and hardcoded
-1200 would answer all three states correctly and pass every one of these.
+These run the real `python -m src.healthcheck` in a subprocess and check its exit
+status. The window is passed explicitly and differs from the probe's 1200 s default,
+so a probe that ignored HEARTBEAT_MAX_AGE would fail.
 """
 
 import ast
@@ -140,32 +135,15 @@ def test_probe_does_not_import_the_application_settings():
 
 # --- dropping privileges -----------------------------------------------------
 #
-# Docker runs HEALTHCHECK outside the ENTRYPOINT, so the gosu drop in
-# entrypoint.sh never applies to the probe: with no USER directive in the image
-# it starts as root every 60 seconds while the loop it grades runs as `app`.
-# These pin both branches of the fork the probe makes about that — the fix must
-# not become a new way for a healthy container to be scored unhealthy.
+# Docker runs HEALTHCHECK outside the ENTRYPOINT, so the probe drops privileges
+# itself. These pin both branches; a failed drop must not score a healthy container
+# unhealthy.
 #
-# WHAT THESE DO NOT TEST, stated plainly because the gap is easy to mistake for
-# coverage: none of them performs a real privilege drop, and the reason is the patching
-# rather than the environment. `_patch_drop` replaces all five primitives, `_geteuid`
-# included — it answers 0, so the root branch runs on a suite that is not root — and the
-# assertions then read the recorded CALLS. Empty a wrapper's body in src/healthcheck.py
-# (`def _setuid(uid): pass`) and nothing here notices; delete the CALL and
-# test_a_root_probe_becomes_the_app_user_groups_first goes red on the call list.
-# (The subprocess probe further up does run drop_privileges unpatched — but it has
-# nothing to do there: locally the suite is not root and the probe returns at the first
-# branch, and in CI it is root inside `python:3.9-slim`, which has no `app` account, so
-# `pwd.getpwnam` raises and the non-fatal branch fires.)
-# What is pinned is the SHAPE of the drop — that it happens, in the right order, and
-# that a failure to perform it is not fatal. The only place the switch is really
-# executed AND observed is `ci/smoke.py`, group (l), against a live container.
-#
-# They patch `src.healthcheck._geteuid` and friends — the module's own one-line
-# wrappers — and NOT `src.healthcheck.os.geteuid`. The latter is the stdlib module
-# object itself, so patching through it replaces the primitive for the whole process
-# for the duration of the test: pytest's own internals, fixtures and plugins running
-# in that window would be told they are root.
+# No real privilege drop happens here: `_patch_drop` replaces all five primitives
+# (`_geteuid` answers 0) and the assertions read the recorded calls, i.e. the shape
+# of the drop. The real switch is exercised only by `ci/smoke.py`, group (l).
+# The module's own wrappers are patched, not `src.healthcheck.os.geteuid`, which is
+# the stdlib module and would affect the whole process.
 
 
 class _RecordingOS:
