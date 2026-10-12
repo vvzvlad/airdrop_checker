@@ -181,14 +181,9 @@ def test_a_string_without_the_placeholder_is_returned_unchanged():
 
 # --- redact_credentials ------------------------------------------------------
 #
-# The proxy string comes from the Grist `Proxy` setting and carries
-# `user:password@` in production. Two library paths put that whole string into the
-# text of the exception they raise (both reproduced against the pinned
-# requests 2.32.3 / urllib3 2.2.3): an unknown SOCKS scheme —
-# `ValueError: Unable to determine SOCKS version from socks9://user:pass@host` —
-# and a proxy URL that does not parse — `Failed to parse: http://user:pass@[...`.
-# That text is logged AND written into the wallet's Grist `Comment` column, so
-# without this it ends up in `docker logs` and in a document people open.
+# The Grist `Proxy` setting carries `user:password@`, and requests/urllib3 quote it
+# in exception text (an unknown SOCKS scheme, or `Failed to parse:`), which is logged
+# and written into the wallet's Grist `Comment` column.
 
 SOCKS_VERSION_ERROR = ("Unable to determine SOCKS version from "
                        "socks9://puser:hunter2@proxy.invalid:1080")
@@ -247,12 +242,8 @@ def test_an_empty_or_missing_proxy_is_not_an_error():
     assert src.balances.redact_credentials(None) == ""
 
 
-# The three shapes the previous, narrower pattern (`[^\s/@]*` for the password) did
-# not redact at all, or redacted only halfway. None of them is exotic: the proxy
-# string is typed by a person into a Grist cell, so the password is whatever the
-# vendor issued — and a '/' in it is the single most common reason urllib3 answers
-# `Failed to parse:` in the first place, which makes the message most likely to be
-# logged the one that used to be least likely to be redacted.
+# Passwords containing '/', whitespace or '@'. The password is whatever the proxy
+# vendor issued, and a '/' is the most common reason urllib3 answers `Failed to parse:`.
 AWKWARD_PASSWORDS = [
     ("Failed to parse: http://puser:hun/ter2@[proxy.invalid",
      "Failed to parse: http://***@[proxy.invalid"),
@@ -308,17 +299,9 @@ def test_a_proxy_failure_leaks_nothing_through_the_log_or_the_raise(monkeypatch,
 
 
 def test_the_whole_rendered_chain_is_clean_not_just_the_top_exception(monkeypatch, logger):
-    # THE TEST ABOVE IS GREEN BY CONSTRUCTION AGAINST THIS BUG, which is why the leak
-    # survived two reviews. `check_balance` re-raises, and with `from e` the ORIGINAL
-    # exception stays attached as __cause__ carrying the full unredacted proxy string;
-    # `str(exception)` never shows it, and every renderer of a chain does:
-    # traceback.format_exc(), logger.error(..., exc_info=True), and the interpreter's
-    # own dump of an exception that escapes (a crash, or Ctrl-C during a request) —
-    # which goes to stderr, i.e. into `docker logs`.
-    #
-    # So this looks at the full render and nothing else. The fix is `from None`; what
-    # keeps the message diagnosable is that the original's class name and its redacted
-    # text are already inside the new message.
+    # `str(exception)` cannot see an unredacted __cause__, but every chain renderer
+    # (format_exc, exc_info=True, an escaping exception) prints it into `docker logs`,
+    # so this checks the full render.
     class _LeakyGet:
         def __call__(self, url, proxies=None, timeout=None):
             raise ValueError(SOCKS_VERSION_ERROR)

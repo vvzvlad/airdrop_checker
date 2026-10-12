@@ -29,10 +29,8 @@ from src.balances import (
 from src.heartbeat import write_heartbeat
 from src.settings import settings
 
-# Naming the logger is not a side effect — getLogger() only registers a name, and
-# `_write_heartbeat` below needs the object. Everything that CHANGES process-wide
-# state (the handler, colorama's stdout wrapper) happens in _configure_process(),
-# called from run().
+# getLogger() has no side effect; process-wide setup (handler, colorama) happens in
+# _configure_process(), called from run().
 logger = logging.getLogger("airdrop_checker")
 
 # The tables of the Grist document this service works against. Not configurable:
@@ -45,33 +43,21 @@ SETTINGS_TABLE = "Settings"
 HEARTBEAT_FILE = settings.heartbeat_file
 
 # How long a single stretch of sleeping may last before the mark is refreshed.
-# THIS IS THE LOAD-BEARING NUMBER OF THE WHOLE HEALTHCHECK, not a tuning knob:
-# the pause between rounds is read from Grist in MINUTES ("Wait time min/max"),
-# so one `time.sleep(time_to_sleep)` would leave the heartbeat untouched for as
-# long as the operator typed into a spreadsheet cell. Past HEARTBEAT_MAX_AGE the
-# probe calls that healthy container unhealthy and auto-heal restarts it —
-# on a schedule, forever, for doing exactly what it was configured to do. Sleeping
-# in 30 s pieces and re-marking after each one makes a long pause indistinguishable
-# from work, which is what it should have been all along.
+# Load-bearing: the pause between rounds comes from Grist in minutes, and a single
+# sleep longer than HEARTBEAT_MAX_AGE would get a healthy container auto-healed.
 HEARTBEAT_SLEEP_CHUNK = 30  # seconds
 
 
 def _configure_process():
     """Process-wide setup, done once when the loop starts — never at import.
 
-    Both of these reach outside this module: colorama replaces `sys.stdout` with
-    a wrapper, and the handler makes this logger write to stderr. Doing them at
-    import time means merely IMPORTING `src.checker` — which the test suite and
-    `ci/smoke.py` both do, without any intention of running the loop — silently
-    reshapes stdout for whoever imported it. A program's side effects belong to
-    running it.
+    colorama replaces `sys.stdout` and the handler writes to stderr; the tests and
+    `ci/smoke.py` import this module without running the loop.
     """
     colorama.init(autoreset=True)
 
     logger.setLevel(logging.INFO)
-    # run() is called once per process, so the guard is not for production: it
-    # keeps a second call (the tests drive run() several times) from stacking
-    # handlers and doubling every log line.
+    # The tests call run() several times; the guard keeps handlers from stacking.
     if not logger.handlers:
         formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         handler = logging.StreamHandler()
@@ -86,9 +72,7 @@ def _write_heartbeat():
 def sleep_with_heartbeat(total_seconds):
     """Sleep `total_seconds`, refreshing the liveness mark every chunk.
 
-    Used for EVERY sleep in the loop, not just the long one — the short
-    ten-second error pauses go through it too, so there is only one way to sleep
-    here and no second path that could quietly forget the mark.
+    Used for every sleep in the loop, including the ten-second error pauses.
     """
     remaining = float(total_seconds)
     while remaining > 0:
@@ -105,12 +89,9 @@ def run():
 
     grist = GristClient(settings.grist_server, settings.grist_doc_id, settings.grist_api_key)
 
-    # The first mark, written BEFORE the first Grist call. It says "the process
-    # started and its configuration parsed", which is precisely what the deploy
-    # needs to hear: our Portainer build waits for `healthy` within
-    # max(120s, start_period + 15s) after recreating the container and rolls the
-    # image back otherwise, and the first round can easily be slower than that
-    # window if Grist is having a bad day.
+    # The first mark, before the first Grist call: the deploy waits for `healthy`
+    # within max(120s, start_period + 15s) and rolls back otherwise, and a slow
+    # Grist can make the first round longer than that.
     _write_heartbeat()
 
     while True:
@@ -118,10 +99,8 @@ def run():
         try:
             proxy_string = grist.get_setting(SETTINGS_TABLE, "Proxy")
             random.seed(datetime.now().timestamp())
-            # `Walled count` is a typo in the Grist document's own Setting column.
-            # It is spelled that way HERE because it is spelled that way THERE —
-            # the document belongs to someone else, and get_setting raises on a
-            # name it cannot find, so "fixing" this string stops the service.
+            # `Walled count` matches the typo in the Grist document's Setting
+            # column; get_setting raises on an unknown name, so do not "fix" it.
             wallet_count_max = int(grist.get_setting(SETTINGS_TABLE, "Walled count max"))
             wallet_count_min = int(grist.get_setting(SETTINGS_TABLE, "Walled count min"))
             wait_time_max = int(grist.get_setting(SETTINGS_TABLE, "Wait time max"))
@@ -129,11 +108,8 @@ def run():
             logger.info(f"wallet_count_max: {wallet_count_max}, wallet_count_min: {wallet_count_min}, wait_time_max: {wait_time_max}, wait_time_min: {wait_time_min}")
             wallets_count = random.randint(wallet_count_min, wallet_count_max)
             wallets = find_none_values(grist, NODES_TABLE, do_random=True, count=wallets_count)
-            # Every line above this one is network: five get_setting calls, each
-            # fetching the Settings table over HTTP, and then the Wallets fetch
-            # inside find_none_values. On a slow Grist the mark at the top of the
-            # iteration is already old by the time execution reaches here, so the
-            # round is re-marked before the per-wallet work begins.
+            # The settings and wallet fetches above are six HTTP calls; re-mark
+            # before the per-wallet work on a slow Grist.
             _write_heartbeat()
             try:
                 proxy = generate_proxy(proxy_string)
@@ -142,65 +118,34 @@ def run():
                     sleep_with_heartbeat(10)
                     continue
                 for wallet in wallets:
-                    # A progress mark per wallet, and it is the load-bearing one
-                    # for a busy round. How many wallets a round takes is
-                    # `Walled count max` in the Grist Settings table — the
-                    # operator's number, not the code's — and each wallet costs
-                    # three purrfolio requests through a proxy plus a Grist write.
-                    # Without this the whole round is one unmarked stretch, and a
-                    # round longer than HEARTBEAT_MAX_AGE gets a perfectly healthy
-                    # service restarted by auto-heal in the middle of its work,
-                    # then again on the next round, forever. A long round is as
-                    # normal a phase of this service as a long pause, and the
-                    # probe has to answer "healthy" during both.
+                    # A mark per wallet: the round size is the operator's Grist
+                    # setting and each wallet costs three proxied requests plus a
+                    # Grist write, so a long round must not look hung.
                     _write_heartbeat()
                     try:
-                        # The proxy is redacted even on the happy path: the string
-                        # comes from Grist with `user:password@` in it, and this
-                        # line runs once per wallet, so an unredacted one puts the
-                        # password in `docker logs` on every single round.
+                        # Redacted on the happy path too: the proxy string carries
+                        # `user:password@`.
                         logger.info(f"Check wallet {wallet.Address} with proxy {redact_credentials(proxy)}...")
                         hypercore_hype_value, hyperevm_hype_value = check_balance(wallet.Address, logger, proxy)
                         grist.update(NODES_TABLE, wallet.id, {"hypercore_hype_value": hypercore_hype_value, "hyperevm_hype_value": hyperevm_hype_value})
                     except Exception as e:
-                        # Redacted on the way out in both directions: this text is
-                        # logged AND written into the wallet's Grist row below, and
-                        # a proxy failure carries the proxy URL — credentials
-                        # included — in its message. A password in a Grist cell
-                        # outlives the log: people open that document and it goes
-                        # into backups.
-                        #
-                        # `describe_error` and not `redact_credentials` alone: the
-                        # `Comment` cell is read long after the log is gone, and
-                        # several of the exceptions that reach here stringify to
-                        # nothing at all (`ConnectionError()`), which used to write
-                        # a bare `Error: ` — indistinguishable, weeks later, from a
-                        # redaction that ate the whole message.
+                        # Logged and written into the wallet's Grist row; a proxy
+                        # failure quotes the proxy URL with credentials, and
+                        # `describe_error` keeps the class name for messageless
+                        # exceptions.
                         reason = describe_error(e)
                         logger.error(f"Error occurred: {reason}")
-                        # KNOWN RISK, deliberately left as it was found. The
-                        # success path above writes `hypercore_hype_value` /
-                        # `hyperevm_hype_value`; this failure path writes `Value`
-                        # and `Comment` instead — two columns nothing else in this
-                        # repository touches. If the Wallets table does not have
-                        # them, Grist rejects the whole batch with 400 and this
-                        # update raises INSIDE the except block, so the wallet's
-                        # failure is replaced by a second, unrelated one and the
-                        # round dies on the outer handler. Whether those columns
-                        # exist is a property of a document this repository does
-                        # not own, so changing the names is the owner's call, not
-                        # a refactor's.
+                        # Known risk: this writes `Value` and `Comment`, columns
+                        # nothing else touches. If the Wallets table lacks them,
+                        # Grist answers 400, this raises inside the except block and
+                        # the round dies on the outer handler. The document's owner
+                        # decides the column names.
                         grist.update(NODES_TABLE, wallet.id, {"Value": "--", "Comment": f"Error: {reason}"})
             except Exception as e:
-                # The traceback goes through the redaction too, not just the
-                # message, and it stays that way now that `check_balance` re-raises
-                # with `from None`. That suppression cleans the ONE chain this
-                # module builds itself; format_exc() here renders whatever exception
-                # actually arrived, and the loop's own Grist calls go out through
-                # `requests`, which honours HTTP_PROXY/HTTPS_PROXY and puts the
-                # whole proxy URL into the text of a ProxyError. So a chain reaching
-                # this handler can still carry credentials that nothing upstream of
-                # it ever touched.
+                # The traceback is redacted too: `from None` in check_balance only
+                # cleans that one chain, and the Grist calls go through `requests`,
+                # which honours HTTP(S)_PROXY and quotes the proxy URL in a
+                # ProxyError.
                 logger.error(f"Error occurred: {describe_error(e)}")
                 logger.error(f"Fail: {describe_error(e)}\n{redact_credentials(traceback.format_exc())}")
                 sleep_with_heartbeat(10)

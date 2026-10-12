@@ -5,10 +5,8 @@ nebula supplies exactly those), and the two heartbeat defaults are the contract
 the Docker HEALTHCHECK and auto-heal are built on — so both are pinned here
 rather than left to be noticed in production.
 
-The startup-failure test is the one that pins the defect this refactor fixed: the
-old top-level script read the three variables with `os.getenv` and never checked
-them, so an unconfigured container died inside its first Grist call with a
-message that named neither the variable nor the problem.
+The startup-failure test pins that an unconfigured container exits with a message
+naming the missing variables.
 
 Every `Settings(...)` here passes `_env_file=None`. Without it a developer's own
 `.env` in the repository root would be read and could supply the very variable a
