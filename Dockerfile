@@ -10,8 +10,12 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # gosu is used by the entrypoint to drop privileges from root to the app user.
+# ca-certificates is listed to take the current Debian package: python:3.9 images
+# are no longer rebuilt, and the 20250419 bundle they ship still trusts the
+# compromised eMudhra chains (emSign ECC Root CA - G3, AAA Certificate Services),
+# removed in 20250419+deb13u1.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
+    && apt-get install -y --no-install-recommends gosu ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Fixed uid keeps volume ownership stable across image rebuilds.

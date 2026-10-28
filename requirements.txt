@@ -1,4 +1,4 @@
-certifi==2024.8.30
+certifi==2026.10.23
 charset-normalizer==3.3.2
 colorama==0.4.6
 grist-client @ https://gitea.vvzvlad.xyz/api/packages/projects/pypi/files/grist-client/0.1.1/grist_client-0.1.1-py3-none-any.whl
